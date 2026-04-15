@@ -306,3 +306,22 @@ All queries filter by `workspace_id`. Membership checks gate access. `X-Workspac
 ## Agent Assignees
 
 Assignees are polymorphic — can be a member or an agent. `assignee_type` + `assignee_id` on issues. Agents render with distinct styling (purple background, robot icon).
+
+## Knowledge Graph
+
+This repo has a **Graphify** knowledge graph for exploring code relationships. Graph is pre-built in `graphify-out/`.
+
+**Usage** (in Claude Code chat):
+```
+/graphify query "how does X relate to Y?"
+/graphify path "ComponentA" "ComponentB"
+/graphify explain "SomeFunction"
+```
+
+Graph auto-updates on git commits/checkouts via hooks in `.git/hooks/`.
+
+## Auth (local dev)
+
+- Login: `POST /auth/verify-code` with `{"email":"helder@gmail.com","code":"888888"}`
+- Primary workspace: `163be89b-fc79-4c00-89b6-b770dfee3229` (multicanais)
+- Opencode agent: `f94db2aa-200e-4880-aa66-b25d024f6404`

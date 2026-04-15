@@ -384,13 +384,26 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 
 		// Look up the prior session for this (agent, issue) pair so the daemon
 		// can resume the Claude Code conversation context.
-		if prior, err := h.Queries.GetLastTaskSession(r.Context(), db.GetLastTaskSessionParams{
-			AgentID: task.AgentID,
-			IssueID: task.IssueID,
-		}); err == nil && prior.SessionID.Valid {
-			resp.PriorSessionID = prior.SessionID.String
-			if prior.WorkDir.Valid {
-				resp.PriorWorkDir = prior.WorkDir.String
+		// Skip for workflow_stage tasks — each stage gets a fresh, isolated session.
+		isWorkflowStage := func() bool {
+			if len(task.Context) == 0 {
+				return false
+			}
+			var payload struct {
+				TaskKind string `json:"task_kind"`
+			}
+			_ = json.Unmarshal(task.Context, &payload)
+			return payload.TaskKind == "workflow_stage"
+		}()
+		if !isWorkflowStage {
+			if prior, err := h.Queries.GetLastTaskSession(r.Context(), db.GetLastTaskSessionParams{
+				AgentID: task.AgentID,
+				IssueID: task.IssueID,
+			}); err == nil && prior.SessionID.Valid {
+				resp.PriorSessionID = prior.SessionID.String
+				if prior.WorkDir.Valid {
+					resp.PriorWorkDir = prior.WorkDir.String
+				}
 			}
 		}
 	}
