@@ -1,10 +1,10 @@
 -- name: CreateWorkflowRun :one
 INSERT INTO workflow_run (
     workspace_id, issue_id, status, phase, plan_version, token_budget, base_branch,
-    created_by, max_steps, max_replans, max_retries_per_step
+    created_by, max_steps, max_replans, max_retries_per_step, run_mode
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7,
-    $8, $9, $10, $11
+    $8, $9, $10, $11, $12
 )
 RETURNING *;
 
@@ -20,7 +20,7 @@ ORDER BY created_at DESC;
 -- name: GetActiveWorkflowRunByIssue :one
 SELECT * FROM workflow_run
 WHERE issue_id = $1
-  AND status IN ('planning', 'awaiting_plan_approval', 'executing', 'awaiting_handoff_approval', 'blocked')
+  AND status IN ('planning', 'planning_complete', 'awaiting_plan_approval', 'executing', 'execution_ready', 'awaiting_handoff_approval', 'blocked')
 ORDER BY created_at DESC
 LIMIT 1;
 

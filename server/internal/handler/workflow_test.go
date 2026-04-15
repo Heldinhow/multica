@@ -231,3 +231,39 @@ func TestCreateWorkflow_CancelsPendingAssignmentTask(t *testing.T) {
 		t.Fatal("expected planner workflow task to be queued")
 	}
 }
+
+func TestCreateWorkflow(t *testing.T) {
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":    "Workflow run mode test issue",
+		"status":   "todo",
+		"priority": "high",
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var issue IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&issue); err != nil {
+		t.Fatalf("decode issue: %v", err)
+	}
+
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/issues/"+issue.ID+"/workflows?workspace_id="+testWorkspaceID, map[string]any{
+		"run_mode": "planning_only",
+	})
+	req = withURLParam(req, "id", issue.ID)
+	testHandler.CreateWorkflow(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateWorkflow: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var run WorkflowRunResponse
+	if err := json.NewDecoder(w.Body).Decode(&run); err != nil {
+		t.Fatalf("decode workflow run: %v", err)
+	}
+	if run.RunMode != "planning_only" {
+		t.Fatalf("CreateWorkflow: expected run_mode planning_only, got %q", run.RunMode)
+	}
+}
