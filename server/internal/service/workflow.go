@@ -45,6 +45,34 @@ type WorkflowPlan struct {
 	Deps        []WorkflowPlanEdge `json:"deps"`
 }
 
+type plannerValidationResult struct {
+	AcceptPlan bool   `json:"accept_plan"`
+	BlockRun   bool   `json:"block_run"`
+	Reason     string `json:"reason"`
+}
+
+func validatePlannerOutput(raw string) plannerValidationResult {
+	lowered := strings.ToLower(raw)
+	forbidden := []string{
+		"i changed the issue status",
+		"i updated the issue",
+		"i implemented",
+		"i made the changes",
+		"i modified the codebase",
+		"i changed the codebase",
+	}
+	for _, pattern := range forbidden {
+		if strings.Contains(lowered, pattern) {
+			return plannerValidationResult{
+				AcceptPlan: false,
+				BlockRun:   true,
+				Reason:     fmt.Sprintf("planner output contains execution claim: %q", pattern),
+			}
+		}
+	}
+	return plannerValidationResult{AcceptPlan: true}
+}
+
 type WorkflowPlanStep struct {
 	LocalID              string   `json:"id"`
 	Role                 string   `json:"role"`
@@ -178,6 +206,10 @@ func (s *WorkflowService) CreateRun(ctx context.Context, issue db.Issue, created
 }
 
 func (s *WorkflowService) Approve(ctx context.Context, run db.WorkflowRun, approval db.WorkflowApproval, reviewer pgtype.UUID, comment string) error {
+	if run.Status != "awaiting_plan_approval" {
+		return fmt.Errorf("workflow run must be in awaiting_plan_approval status to approve")
+	}
+
 	tx, err := s.TxStarter.Begin(ctx)
 	if err != nil {
 		return err
@@ -289,10 +321,10 @@ func (s *WorkflowService) Approve(ctx context.Context, run db.WorkflowRun, appro
 
 func (s *WorkflowService) StartExecution(ctx context.Context, run db.WorkflowRun) error {
 	if run.RunMode != "planning_plus_execution" {
-		return fmt.Errorf("StartExecution is only valid for planning_plus_execution runs")
+		return fmt.Errorf("StartExecution requires planning_plus_execution mode, got: %s", run.RunMode)
 	}
 	if run.Status != "execution_ready" {
-		return fmt.Errorf("workflow run must be in execution_ready status to start execution")
+		return fmt.Errorf("workflow run must be in execution_ready status to start execution, got: %s", run.Status)
 	}
 
 	tx, err := s.TxStarter.Begin(ctx)
@@ -615,6 +647,42 @@ func (s *WorkflowService) HandleTaskFailure(ctx context.Context, task db.AgentTa
 }
 
 func (s *WorkflowService) materializePlannerResult(ctx context.Context, run db.WorkflowRun, step db.WorkflowStep, agentID pgtype.UUID, output string) error {
+	if validation := validatePlannerOutput(output); validation.BlockRun {
+		tx, err := s.TxStarter.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+		qtx := s.Queries.WithTx(tx)
+
+		if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
+			ID:     run.ID,
+			Status: pgtype.Text{String: "blocked", Valid: true},
+			Phase:  pgtype.Text{String: "blocked", Valid: true},
+		}); err != nil {
+			return err
+		}
+		if _, err := qtx.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
+			WorkflowRunID:  run.ID,
+			WorkflowStepID: step.ID,
+			EventType:      "planner.violation",
+			Payload: mustJSON(map[string]any{
+				"reason": validation.Reason,
+			}),
+		}); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		s.publishWorkflowRunByID(ctx, run.ID)
+		s.publishWorkflowEvent(run, step.ID, "workflow:event_created", map[string]any{
+			"event_type": "planner.violation",
+			"reason":     validation.Reason,
+		})
+		return nil
+	}
+
 	plan, err := parsePlannerOutput(output)
 	if err != nil {
 		slog.Warn("planner output parse failed", "workflow_run_id", util.UUIDToString(run.ID), "error", err)
@@ -1056,6 +1124,15 @@ func (s *WorkflowService) bootstrapExecutionStepsTx(ctx context.Context, qtx *db
 			continue
 		}
 		if inbound[util.UUIDToString(step.ID)] > 0 {
+			continue
+		}
+		if step.RequiresApproval {
+			if _, err := qtx.UpdateWorkflowStepState(ctx, db.UpdateWorkflowStepStateParams{
+				ID:     step.ID,
+				Status: pgtype.Text{String: "awaiting_approval", Valid: true},
+			}); err != nil {
+				return err
+			}
 			continue
 		}
 		agent, err := s.Queries.GetAgent(ctx, step.AssignedAgentID)
