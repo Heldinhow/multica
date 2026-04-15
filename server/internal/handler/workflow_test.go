@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -542,5 +543,81 @@ func TestApproveWorkflowApproval_PlanningPlusExecution_EndsInExecutionReady(t *t
 	}
 	if coderQueued {
 		t.Fatal("expected coder step NOT to be queued after planning_plus_execution approval")
+	}
+}
+
+func countIssueComments(ctx context.Context, issueID string) int {
+	var count int
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM comment WHERE issue_id = $1`, parseUUID(issueID)).Scan(&count); err != nil {
+		return 0
+	}
+	return count
+}
+
+func TestCompleteTask_WorkflowTask_NoAutoComment(t *testing.T) {
+	ctx := context.Background()
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":    "Workflow task auto-comment regression test",
+		"status":   "todo",
+		"priority": "high",
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var issue IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&issue); err != nil {
+		t.Fatalf("decode issue: %v", err)
+	}
+
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/issues/"+issue.ID+"/workflows", nil)
+	req = withURLParam(req, "id", issue.ID)
+	testHandler.CreateWorkflow(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateWorkflow: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	tasks, err := testHandler.Queries.ListTasksByIssue(req.Context(), parseUUID(issue.ID))
+	if err != nil {
+		t.Fatalf("ListTasksByIssue: %v", err)
+	}
+	var plannerTask db.AgentTaskQueue
+	for _, task := range tasks {
+		if task.WorkflowStepID.Valid {
+			plannerTask = task
+			break
+		}
+	}
+	if !plannerTask.ID.Valid {
+		t.Fatal("expected planner task with workflow_step_id")
+	}
+
+	if _, err := testPool.Exec(ctx, `
+		UPDATE agent_task_queue
+		SET status = 'running', started_at = now()
+		WHERE id = $1
+	`, plannerTask.ID); err != nil {
+		t.Fatalf("set task to running: %v", err)
+	}
+
+	commentsBefore := countIssueComments(ctx, issue.ID)
+
+	result := []byte(`{"output": "Plan: implement feature X"}`)
+	completedTask, err := testHandler.TaskService.CompleteTask(ctx, plannerTask.ID, result, "", "")
+	if err != nil {
+		t.Fatalf("CompleteTask failed: %v", err)
+	}
+	if completedTask == nil {
+		t.Fatal("CompleteTask returned nil task")
+	}
+
+	commentsAfter := countIssueComments(ctx, issue.ID)
+	if commentsAfter != commentsBefore {
+		t.Fatalf("expected no auto comment for workflow task, got %d new comments (before=%d, after=%d)",
+			commentsAfter-commentsBefore, commentsBefore, commentsAfter)
 	}
 }

@@ -280,7 +280,8 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 	// Comment-triggered tasks: the agent replies via CLI with --parent, so
 	// posting here would create a duplicate.
 	// Chat tasks: no comment posting needed.
-	if task.IssueID.Valid && !task.TriggerCommentID.Valid {
+	// Workflow tasks: the WorkflowService handles output via artifacts, not comments.
+	if task.IssueID.Valid && !task.TriggerCommentID.Valid && !task.WorkflowStepID.Valid {
 		agentCommented, _ := s.Queries.HasAgentCommentedSince(ctx, db.HasAgentCommentedSinceParams{
 			IssueID:  task.IssueID,
 			AuthorID: task.AgentID,
