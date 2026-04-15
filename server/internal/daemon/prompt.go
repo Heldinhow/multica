@@ -70,10 +70,62 @@ func buildWorkflowPrompt(task Task) string {
 		b.WriteString("  ],\n")
 		b.WriteString("  \"deps\": []\n")
 		b.WriteString("}\n")
-		b.WriteString("If the task is planning-only, still return the JSON contract with one or more read_only steps.\n")
+		b.WriteString("\nApproval gate rules (CRITICAL):\n")
+		b.WriteString("- All 'coder' steps MUST have \"approval_gate\": true (human reviews code changes)\n")
+		b.WriteString("- All 'reviewer' steps MUST have \"approval_gate\": false (reviewer output feeds human decision)\n")
+		b.WriteString("- All 'tester' steps SHOULD have \"approval_gate\": true (human reviews test results before PR)\n")
+		b.WriteString("\nRole-specific output requirements:\n")
+		b.WriteString("- Coder steps produce 'diff_summary' artifact (JSON: {files_changed, summary, diff})\n")
+		b.WriteString("- Reviewer steps produce 'review_report' artifact (JSON: {status, issues, recommendations})\n")
+		b.WriteString("- Tester steps produce 'test_report' artifact (JSON: {status, tests_run, tests_passed, failures})\n")
+		b.WriteString("\nIf the task is planning-only, still return the JSON contract with one or more read_only steps.\n")
 		return b.String()
 	}
-	b.WriteString("Produce output that is appropriate for your role.\n")
+	// Role-specific output requirements
+	switch step.Role {
+	case "coder":
+		b.WriteString("\nCoder output requirements:\n")
+		b.WriteString("- Implement the code changes as described in the objective.\n")
+		b.WriteString("- Output ONLY valid JSON (no markdown fences):\n")
+		b.WriteString("{\n")
+		b.WriteString("  \"files_changed\": [\"path/to/file.ts\", ...],\n")
+		b.WriteString("  \"summary\": \"Brief description of changes\",\n")
+		b.WriteString("  \"diff\": \"Full git diff output\"\n")
+		b.WriteString("}\n")
+		if step.ContextVersion > 1 {
+			b.WriteString("\nIMPORTANT: This is a retry attempt. Review previous rejection feedback and address the issues.\n")
+		}
+	case "reviewer":
+		b.WriteString("\nReviewer output requirements:\n")
+		b.WriteString("- Review the code changes from the coder step.\n")
+		b.WriteString("- Check for: correctness, maintainability, edge cases, security issues, test coverage.\n")
+		b.WriteString("- Output ONLY valid JSON (no markdown fences):\n")
+		b.WriteString("{\n")
+		b.WriteString("  \"status\": \"approved\" | \"needs_changes\",\n")
+		b.WriteString("  \"issues\": [\n")
+		b.WriteString("    {\"severity\": \"error\"|\"warning\"|\"info\", \"file\": \"path\", \"line\": 42, \"message\": \"...\"}\n")
+		b.WriteString("  ],\n")
+		b.WriteString("  \"recommendations\": \"Overall feedback and suggestions\"\n")
+		b.WriteString("}\n")
+	case "tester":
+		b.WriteString("\nTester output requirements:\n")
+		b.WriteString("- Run all relevant tests for the changes.\n")
+		b.WriteString("- Verify both unit tests and integration tests pass.\n")
+		b.WriteString("- Output ONLY valid JSON (no markdown fences):\n")
+		b.WriteString("{\n")
+		b.WriteString("  \"status\": \"passed\" | \"failed\",\n")
+		b.WriteString("  \"tests_run\": 50,\n")
+		b.WriteString("  \"tests_passed\": 47,\n")
+		b.WriteString("  \"failures\": [\n")
+		b.WriteString("    {\"test_name\": \"...\", \"error\": \"...\", \"stack_trace\": \"...\"}\n")
+		b.WriteString("  ]\n")
+		b.WriteString("}\n")
+		if step.ContextVersion > 1 {
+			b.WriteString("\nIMPORTANT: This is a retry attempt. Review previous rejection feedback and address the test failures.\n")
+		}
+	default:
+		b.WriteString("Produce output that is appropriate for your role.\n")
+	}
 	return b.String()
 }
 

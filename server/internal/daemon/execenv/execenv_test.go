@@ -1001,3 +1001,157 @@ func TestReadGCMeta_NoFile(t *testing.T) {
 		t.Fatal("expected error for missing file")
 	}
 }
+
+func TestInjectRuntimeConfig_WorkflowPlannerTask_NoGenericAssignmentInstructions(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	ctx := TaskContextForEnv{
+		IssueID:           "test-issue-id",
+		TriggerCommentID:  "", // empty = not comment-triggered
+		AgentID:           "agent-123",
+		AgentName:         "Planner Agent",
+		AgentInstructions: "",
+		AgentSkills:       []SkillContextForEnv{},
+		Repos:             []RepoContextForEnv{},
+		ChatSessionID:     "", // empty = not chat
+		WorkflowRole:      "planner",
+		WorkflowRunMode:   "planning_only",
+		WorkflowPhase:     "planning",
+	}
+
+	if err := InjectRuntimeConfig(dir, "claude", ctx); err != nil {
+		t.Fatalf("InjectRuntimeConfig failed: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(dir, "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("failed to read CLAUDE.md: %v", err)
+	}
+
+	config := string(content)
+
+	if strings.Contains(config, "issue status test-issue-id in_progress") {
+		t.Fatal("workflow planner task should not receive generic assignment status instructions")
+	}
+	if strings.Contains(config, "issue status test-issue-id in_review") {
+		t.Fatal("workflow planner task should not receive generic assignment status instructions")
+	}
+	if !strings.Contains(config, "Do NOT change the issue status") {
+		t.Fatal("planner workflow config should forbid issue status changes")
+	}
+	if !strings.Contains(config, "Do NOT post comments") {
+		t.Fatal("planner workflow config should forbid posting comments")
+	}
+}
+
+func TestInjectRuntimeConfig_WorkflowCoderTask_NoGenericAssignmentInstructions(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	ctx := TaskContextForEnv{
+		IssueID:           "test-issue-id",
+		TriggerCommentID:  "",
+		AgentID:           "agent-456",
+		AgentName:         "Coder Agent",
+		AgentInstructions: "",
+		AgentSkills:       []SkillContextForEnv{},
+		Repos:             []RepoContextForEnv{},
+		ChatSessionID:     "",
+		WorkflowRole:      "coder",
+		WorkflowRunMode:   "planning_plus_execution",
+		WorkflowPhase:     "execution",
+	}
+
+	if err := InjectRuntimeConfig(dir, "claude", ctx); err != nil {
+		t.Fatalf("InjectRuntimeConfig failed: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(dir, "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("failed to read CLAUDE.md: %v", err)
+	}
+
+	config := string(content)
+
+	if strings.Contains(config, "issue status test-issue-id in_progress") {
+		t.Fatal("workflow coder task should not receive generic assignment status instructions")
+	}
+	if strings.Contains(config, "issue status test-issue-id in_review") {
+		t.Fatal("workflow coder task should not receive generic assignment status instructions")
+	}
+}
+
+func TestInjectRuntimeConfig_AssignmentTask_StillGetsAssignmentInstructions(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	ctx := TaskContextForEnv{
+		IssueID:           "test-issue-id",
+		TriggerCommentID:  "", // empty = assignment-triggered
+		AgentID:           "agent-789",
+		AgentName:         "Assigned Agent",
+		AgentInstructions: "",
+		AgentSkills:       []SkillContextForEnv{},
+		Repos:             []RepoContextForEnv{},
+		ChatSessionID:     "",
+		WorkflowRole:      "", // empty = NOT a workflow task
+		WorkflowRunMode:   "",
+		WorkflowPhase:     "",
+	}
+
+	if err := InjectRuntimeConfig(dir, "claude", ctx); err != nil {
+		t.Fatalf("InjectRuntimeConfig failed: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(dir, "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("failed to read CLAUDE.md: %v", err)
+	}
+
+	config := string(content)
+
+	if !strings.Contains(config, "issue status test-issue-id in_progress") {
+		t.Fatal("assignment task should still receive in_progress status instruction")
+	}
+	if !strings.Contains(config, "issue status test-issue-id in_review") {
+		t.Fatal("assignment task should still receive in_review status instruction")
+	}
+}
+
+func TestInjectRuntimeConfig_WorkflowPlannerTask_PlannerSpecificInstructions(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	ctx := TaskContextForEnv{
+		IssueID:           "test-issue-id",
+		TriggerCommentID:  "",
+		AgentID:           "agent-planner",
+		AgentName:         "Planner Agent",
+		AgentInstructions: "",
+		AgentSkills:       []SkillContextForEnv{},
+		Repos:             []RepoContextForEnv{},
+		ChatSessionID:     "",
+		WorkflowRole:      "planner",
+		WorkflowRunMode:   "planning_only",
+		WorkflowPhase:     "planning",
+	}
+
+	if err := InjectRuntimeConfig(dir, "claude", ctx); err != nil {
+		t.Fatalf("InjectRuntimeConfig failed: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(dir, "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("failed to read CLAUDE.md: %v", err)
+	}
+
+	config := string(content)
+
+	if !strings.Contains(config, "Return JSON only") {
+		t.Fatal("planner workflow config should include JSON-only requirement")
+	}
+	if !strings.Contains(config, "Do NOT perform any execution work") {
+		t.Fatal("planner workflow config should forbid execution work")
+	}
+}

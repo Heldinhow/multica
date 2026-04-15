@@ -122,6 +122,21 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 		fmt.Fprintf(&b, "4. Reply: `multica issue comment add %s --parent %s --content \"...\"`\n", ctx.IssueID, ctx.TriggerCommentID)
 		b.WriteString("5. If the comment requests code changes or further work, do the work first, then reply with your results\n")
 		b.WriteString("6. Do NOT change the issue status unless the comment explicitly asks for it\n\n")
+	} else if ctx.WorkflowRole != "" {
+		// Workflow task: role-specific behavior, no generic assignment flow
+		if ctx.WorkflowRole == "planner" {
+			b.WriteString("**You are a PLANNER agent in a workflow.** Your role is to produce a structured plan only.\n\n")
+			b.WriteString("- Do NOT change the issue status\n")
+			b.WriteString("- Do NOT post comments to the issue\n")
+			b.WriteString("- Do NOT perform any execution work\n")
+			b.WriteString("- Return JSON only per the planner contract\n")
+			b.WriteString("- Do not add markdown fences, commentary, or explanatory text around the JSON\n\n")
+		} else {
+			// coder, reviewer, tester
+			b.WriteString("**You are a WORKFLOW agent.** Follow your role-specific output requirements.\n\n")
+			b.WriteString("- Do NOT change the issue status\n")
+			b.WriteString("- Return JSON output per your role contract\n\n")
+		}
 	} else {
 		// Assignment-triggered: defer to agent Skills for workflow specifics.
 		b.WriteString("You are responsible for managing the issue status throughout your work.\n\n")
