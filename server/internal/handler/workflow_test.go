@@ -169,14 +169,14 @@ func TestWorkflowLifecycle_CreatePlanApprove(t *testing.T) {
 	if started.Status != "executing" {
 		t.Fatalf("StartWorkflowExecution: expected executing status, got %q", started.Status)
 	}
-	coderQueued = false
+	coderAwaitingApproval := false
 	for _, step := range started.Steps {
-		if step.Role == "coder" && step.Status == "queued" {
-			coderQueued = true
+		if step.Role == "coder" && step.Status == "awaiting_approval" && step.RequiresApproval {
+			coderAwaitingApproval = true
 		}
 	}
-	if !coderQueued {
-		t.Fatalf("expected coder step to be queued after start, got %+v", started.Steps)
+	if !coderAwaitingApproval {
+		t.Fatalf("expected coder step to be awaiting_approval after start, got %+v", started.Steps)
 	}
 }
 
