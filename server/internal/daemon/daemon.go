@@ -961,6 +961,15 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 		Repos:             convertReposForEnv(task.Repos),
 		ChatSessionID:     task.ChatSessionID,
 	}
+	if task.WorkflowStep != nil {
+		taskCtx.WorkflowRole = task.WorkflowStep.Role
+		if mode, ok := task.WorkflowStep.Metadata["run_mode"].(string); ok {
+			taskCtx.WorkflowRunMode = mode
+		}
+		if phase, ok := task.WorkflowStep.Metadata["phase"].(string); ok {
+			taskCtx.WorkflowPhase = phase
+		}
+	}
 
 	// Try to reuse the workdir from a previous task on the same (agent, issue) pair.
 	var env *execenv.Environment

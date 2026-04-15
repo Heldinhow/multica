@@ -97,8 +97,10 @@ export interface WorkflowRun {
   issue_id: string;
   status:
     | "planning"
+    | "planning_complete"
     | "awaiting_plan_approval"
     | "executing"
+    | "execution_ready"
     | "awaiting_handoff_approval"
     | "blocked"
     | "completed"
@@ -114,6 +116,7 @@ export interface WorkflowRun {
   max_replans: number;
   max_retries_per_step: number;
   replan_count: number;
+  run_mode: "planning_only" | "planning_plus_execution";
   created_at: string;
   updated_at: string;
   steps: WorkflowStep[];

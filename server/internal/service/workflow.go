@@ -45,6 +45,34 @@ type WorkflowPlan struct {
 	Deps        []WorkflowPlanEdge `json:"deps"`
 }
 
+type plannerValidationResult struct {
+	AcceptPlan bool   `json:"accept_plan"`
+	BlockRun   bool   `json:"block_run"`
+	Reason     string `json:"reason"`
+}
+
+func validatePlannerOutput(raw string) plannerValidationResult {
+	lowered := strings.ToLower(raw)
+	forbidden := []string{
+		"i changed the issue status",
+		"i updated the issue",
+		"i implemented",
+		"i made the changes",
+		"i modified the codebase",
+		"i changed the codebase",
+	}
+	for _, pattern := range forbidden {
+		if strings.Contains(lowered, pattern) {
+			return plannerValidationResult{
+				AcceptPlan: false,
+				BlockRun:   true,
+				Reason:     fmt.Sprintf("planner output contains execution claim: %q", pattern),
+			}
+		}
+	}
+	return plannerValidationResult{AcceptPlan: true}
+}
+
 type WorkflowPlanStep struct {
 	LocalID              string   `json:"id"`
 	Role                 string   `json:"role"`
@@ -62,7 +90,7 @@ type WorkflowPlanEdge struct {
 	To   string `json:"to"`
 }
 
-func (s *WorkflowService) CreateRun(ctx context.Context, issue db.Issue, createdBy pgtype.UUID) (db.WorkflowRun, db.WorkflowStep, error) {
+func (s *WorkflowService) CreateRun(ctx context.Context, issue db.Issue, createdBy pgtype.UUID, runMode string) (db.WorkflowRun, db.WorkflowStep, error) {
 	if createdBy.Valid == false {
 		return db.WorkflowRun{}, db.WorkflowStep{}, fmt.Errorf("created_by is required")
 	}
@@ -102,6 +130,7 @@ func (s *WorkflowService) CreateRun(ctx context.Context, issue db.Issue, created
 		MaxSteps:          20,
 		MaxReplans:        2,
 		MaxRetriesPerStep: 2,
+		RunMode:           runMode,
 	})
 	if err != nil {
 		return db.WorkflowRun{}, db.WorkflowStep{}, fmt.Errorf("create workflow run: %w", err)
@@ -177,6 +206,10 @@ func (s *WorkflowService) CreateRun(ctx context.Context, issue db.Issue, created
 }
 
 func (s *WorkflowService) Approve(ctx context.Context, run db.WorkflowRun, approval db.WorkflowApproval, reviewer pgtype.UUID, comment string) error {
+	if run.Status != "awaiting_plan_approval" {
+		return fmt.Errorf("workflow run must be in awaiting_plan_approval status to approve")
+	}
+
 	tx, err := s.TxStarter.Begin(ctx)
 	if err != nil {
 		return err
@@ -203,16 +236,27 @@ func (s *WorkflowService) Approve(ctx context.Context, run db.WorkflowRun, appro
 				return err
 			}
 		}
-		if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
-			ID:             run.ID,
-			Status:         pgtype.Text{String: "executing", Valid: true},
-			Phase:          pgtype.Text{String: "execution", Valid: true},
-			ApprovedPlanAt: nowUTC(),
-		}); err != nil {
-			return err
-		}
-		if err := s.bootstrapExecutionStepsTx(ctx, qtx, run.ID); err != nil {
-			return err
+		switch run.RunMode {
+		case "planning_only":
+			if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
+				ID:             run.ID,
+				Status:         pgtype.Text{String: "planning_complete", Valid: true},
+				Phase:          pgtype.Text{String: "planning_complete", Valid: true},
+				ApprovedPlanAt: nowUTC(),
+			}); err != nil {
+				return err
+			}
+		case "planning_plus_execution":
+			if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
+				ID:             run.ID,
+				Status:         pgtype.Text{String: "execution_ready", Valid: true},
+				Phase:          pgtype.Text{String: "execution_ready", Valid: true},
+				ApprovedPlanAt: nowUTC(),
+			}); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unknown run mode: %q", run.RunMode)
 		}
 	case "handoff":
 		if approval.WorkflowStepID.Valid {
@@ -234,6 +278,11 @@ func (s *WorkflowService) Approve(ctx context.Context, run db.WorkflowRun, appro
 			}); err != nil {
 				return err
 			}
+		}
+		// Create pull request after finalize approval
+		if err := s.createPullRequestTx(ctx, qtx, run); err != nil {
+			slog.Warn("failed to create pull request", "workflow_run_id", util.UUIDToString(run.ID), "error", err)
+			// Don't fail the approval if PR creation fails - log and continue
 		}
 		if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
 			ID:     run.ID,
@@ -267,6 +316,38 @@ func (s *WorkflowService) Approve(ctx context.Context, run db.WorkflowRun, appro
 	s.publishWorkflowEvent(run, approval.WorkflowStepID, "workflow:event_created", map[string]any{
 		"event_type": "approval.approved",
 	})
+	return nil
+}
+
+func (s *WorkflowService) StartExecution(ctx context.Context, run db.WorkflowRun) error {
+	if run.RunMode != "planning_plus_execution" {
+		return fmt.Errorf("StartExecution requires planning_plus_execution mode, got: %s", run.RunMode)
+	}
+	if run.Status != "execution_ready" {
+		return fmt.Errorf("workflow run must be in execution_ready status to start execution, got: %s", run.Status)
+	}
+
+	tx, err := s.TxStarter.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	qtx := s.Queries.WithTx(tx)
+
+	if err := s.bootstrapExecutionStepsTx(ctx, qtx, run.ID); err != nil {
+		return err
+	}
+	if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
+		ID:     run.ID,
+		Status: pgtype.Text{String: "executing", Valid: true},
+		Phase:  pgtype.Text{String: "execution", Valid: true},
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.publishWorkflowRunByID(ctx, run.ID)
 	return nil
 }
 
@@ -327,24 +408,71 @@ func (s *WorkflowService) Reject(ctx context.Context, run db.WorkflowRun, approv
 		}
 	case "handoff", "finalize":
 		if approval.WorkflowStepID.Valid {
-			step, err := qtx.GetWorkflowStep(ctx, approval.WorkflowStepID)
+			// Determine which step to retry
+			// For handoff: if from_step_id exists (reviewer created this), reject the coder (from_step)
+			// For finalize: reject the step that created the approval (usually tester)
+			targetStepID := approval.WorkflowStepID
+			if approval.Scope == "handoff" && approval.FromStepID.Valid {
+				// Reviewer rejection - target the coder step
+				targetStepID = approval.FromStepID
+			}
+
+			step, err := qtx.GetWorkflowStep(ctx, targetStepID)
 			if err != nil {
 				return err
 			}
-			if _, err := qtx.UpdateWorkflowStepState(ctx, db.UpdateWorkflowStepStateParams{
-				ID:             step.ID,
-				Status:         pgtype.Text{String: "ready", Valid: true},
-				ContextVersion: pgtype.Int4{Int32: step.ContextVersion + 1, Valid: true},
-			}); err != nil {
-				return err
+
+			// Check retry limit
+			if step.RetryCount >= run.MaxRetriesPerStep {
+				// Exceeded retry limit - mark step and workflow as blocked
+				if _, err := qtx.UpdateWorkflowStepState(ctx, db.UpdateWorkflowStepStateParams{
+					ID:     step.ID,
+					Status: pgtype.Text{String: "blocked", Valid: true},
+				}); err != nil {
+					return err
+				}
+				if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
+					ID:     run.ID,
+					Status: pgtype.Text{String: "blocked", Valid: true},
+					Phase:  pgtype.Text{String: "blocked", Valid: true},
+				}); err != nil {
+					return err
+				}
+				if _, err := qtx.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
+					WorkflowRunID:  run.ID,
+					WorkflowStepID: step.ID,
+					EventType:      "step.retry_limit_exceeded",
+					Payload: mustJSON(map[string]any{
+						"role":        step.Role,
+						"retry_count": step.RetryCount,
+						"max_retries": run.MaxRetriesPerStep,
+						"reason":      comment,
+					}),
+				}); err != nil {
+					return err
+				}
+			} else {
+				// Within retry limit - mark ready for retry
+				if _, err := qtx.UpdateWorkflowStepState(ctx, db.UpdateWorkflowStepStateParams{
+					ID:             step.ID,
+					Status:         pgtype.Text{String: "ready", Valid: true},
+					ContextVersion: pgtype.Int4{Int32: step.ContextVersion + 1, Valid: true},
+					RetryCount:     pgtype.Int4{Int32: step.RetryCount + 1, Valid: true},
+				}); err != nil {
+					return err
+				}
+				if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
+					ID:     run.ID,
+					Status: pgtype.Text{String: "executing", Valid: true},
+					Phase:  pgtype.Text{String: "execution", Valid: true},
+				}); err != nil {
+					return err
+				}
+				// Schedule ready steps to re-enqueue the rejected step
+				if err := s.scheduleReadyStepsTx(ctx, qtx, run.ID); err != nil {
+					return err
+				}
 			}
-		}
-		if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
-			ID:     run.ID,
-			Status: pgtype.Text{String: "executing", Valid: true},
-			Phase:  pgtype.Text{String: "execution", Valid: true},
-		}); err != nil {
-			return err
 		}
 	}
 
@@ -368,6 +496,69 @@ func (s *WorkflowService) Reject(ctx context.Context, run db.WorkflowRun, approv
 	s.publishWorkflowEvent(run, approval.WorkflowStepID, "workflow:event_created", map[string]any{
 		"event_type": "approval.rejected",
 	})
+	return nil
+}
+
+func (s *WorkflowService) createPullRequestTx(ctx context.Context, qtx *db.Queries, run db.WorkflowRun) error {
+	// Collect all diff artifacts from coder steps
+	artifacts, err := qtx.ListWorkflowArtifactsByRun(ctx, run.ID)
+	if err != nil {
+		return fmt.Errorf("list artifacts: %w", err)
+	}
+
+	var diffs []string
+	var filesChanged []string
+	for _, artifact := range artifacts {
+		if artifact.ArtifactType == "diff_summary" {
+			var diffSummary DiffSummary
+			if err := json.Unmarshal(artifact.Content, &diffSummary); err == nil {
+				diffs = append(diffs, diffSummary.Diff)
+				filesChanged = append(filesChanged, diffSummary.FilesChanged...)
+			}
+		}
+	}
+
+	if len(diffs) == 0 {
+		return fmt.Errorf("no diff artifacts found for workflow run")
+	}
+
+	// Determine branch name
+	branchName := fmt.Sprintf("workflow/%s", util.UUIDToString(run.ID))
+
+	// TODO: Actually create PR via GitHub API or external service
+	// For now, create a placeholder artifact with the information needed
+	prSummary := map[string]any{
+		"branch":        branchName,
+		"base_branch":   run.BaseBranch,
+		"files_changed": filesChanged,
+		"diff_count":    len(diffs),
+		"status":        "ready_for_creation",
+		"pr_url":        "", // Will be filled when actual PR is created
+		"pr_number":     0,  // Will be filled when actual PR is created
+	}
+
+	// Create final_summary artifact
+	if _, err := qtx.CreateWorkflowArtifact(ctx, db.CreateWorkflowArtifactParams{
+		WorkflowRunID: run.ID,
+		ArtifactType:  "final_summary",
+		Summary:       fmt.Sprintf("PR ready for branch %s", branchName),
+		Content:       mustJSON(prSummary),
+	}); err != nil {
+		return fmt.Errorf("create final_summary artifact: %w", err)
+	}
+
+	// Create workflow event
+	if _, err := qtx.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
+		WorkflowRunID: run.ID,
+		EventType:     "pr.ready",
+		Payload: mustJSON(map[string]any{
+			"branch":      branchName,
+			"base_branch": run.BaseBranch,
+		}),
+	}); err != nil {
+		return fmt.Errorf("create pr.ready event: %w", err)
+	}
+
 	return nil
 }
 
@@ -456,6 +647,42 @@ func (s *WorkflowService) HandleTaskFailure(ctx context.Context, task db.AgentTa
 }
 
 func (s *WorkflowService) materializePlannerResult(ctx context.Context, run db.WorkflowRun, step db.WorkflowStep, agentID pgtype.UUID, output string) error {
+	if validation := validatePlannerOutput(output); validation.BlockRun {
+		tx, err := s.TxStarter.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+		qtx := s.Queries.WithTx(tx)
+
+		if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
+			ID:     run.ID,
+			Status: pgtype.Text{String: "blocked", Valid: true},
+			Phase:  pgtype.Text{String: "blocked", Valid: true},
+		}); err != nil {
+			return err
+		}
+		if _, err := qtx.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
+			WorkflowRunID:  run.ID,
+			WorkflowStepID: step.ID,
+			EventType:      "planner.violation",
+			Payload: mustJSON(map[string]any{
+				"reason": validation.Reason,
+			}),
+		}); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		s.publishWorkflowRunByID(ctx, run.ID)
+		s.publishWorkflowEvent(run, step.ID, "workflow:event_created", map[string]any{
+			"event_type": "planner.violation",
+			"reason":     validation.Reason,
+		})
+		return nil
+	}
+
 	plan, err := parsePlannerOutput(output)
 	if err != nil {
 		slog.Warn("planner output parse failed", "workflow_run_id", util.UUIDToString(run.ID), "error", err)
@@ -579,6 +806,19 @@ func (s *WorkflowService) materializePlannerResult(ctx context.Context, run db.W
 }
 
 func (s *WorkflowService) completeExecutionStep(ctx context.Context, run db.WorkflowRun, step db.WorkflowStep, agentID pgtype.UUID, output string) error {
+	switch step.Role {
+	case "coder":
+		return s.completeCoderStep(ctx, run, step, agentID, output)
+	case "reviewer":
+		return s.completeReviewerStep(ctx, run, step, agentID, output)
+	case "tester":
+		return s.completeTesterStep(ctx, run, step, agentID, output)
+	default:
+		return fmt.Errorf("unknown execution step role: %s", step.Role)
+	}
+}
+
+func (s *WorkflowService) completeCoderStep(ctx context.Context, run db.WorkflowRun, step db.WorkflowStep, agentID pgtype.UUID, output string) error {
 	tx, err := s.TxStarter.Begin(ctx)
 	if err != nil {
 		return err
@@ -586,81 +826,50 @@ func (s *WorkflowService) completeExecutionStep(ctx context.Context, run db.Work
 	defer tx.Rollback(ctx)
 	qtx := s.Queries.WithTx(tx)
 
-	artifactType := artifactTypeForRole(step.Role)
+	// Parse coder output for structured diff_summary
+	diffSummary := parseDiffSummary(output)
 	if _, err := qtx.CreateWorkflowArtifact(ctx, db.CreateWorkflowArtifactParams{
 		WorkflowRunID:    run.ID,
 		WorkflowStepID:   step.ID,
-		ArtifactType:     artifactType,
-		Summary:          truncate(output, 240),
-		Content:          mustJSON(map[string]any{"output": output}),
+		ArtifactType:     "diff_summary",
+		Summary:          truncate(diffSummary.Summary, 240),
+		Content:          mustJSON(diffSummary),
 		CreatedByAgentID: agentID,
 	}); err != nil {
 		return err
 	}
 
-	newStatus := "completed"
-	runStatus := pgtype.Text{String: "executing", Valid: true}
-	runPhase := pgtype.Text{String: "execution", Valid: true}
-	if step.RequiresApproval {
-		newStatus = "awaiting_approval"
-		runStatus = pgtype.Text{String: "awaiting_handoff_approval", Valid: true}
-		runPhase = pgtype.Text{String: "handoff_review", Valid: true}
-		scope := "handoff"
-		if step.Role == "tester" {
-			scope = "finalize"
-		}
-		if _, err := qtx.CreateWorkflowApproval(ctx, db.CreateWorkflowApprovalParams{
-			WorkflowRunID:  run.ID,
-			Scope:          scope,
-			Status:         "pending",
-			Comment:        fmt.Sprintf("Review the %s step output before the workflow continues.", step.Role),
-			WorkflowStepID: step.ID,
-		}); err != nil {
-			return err
-		}
+	// Coder always requires approval (handoff scope)
+	if _, err := qtx.CreateWorkflowApproval(ctx, db.CreateWorkflowApprovalParams{
+		WorkflowRunID:  run.ID,
+		Scope:          "handoff",
+		Status:         "pending",
+		Comment:        "Review the code changes before proceeding to the next step.",
+		WorkflowStepID: step.ID,
+	}); err != nil {
+		return err
 	}
 
 	if _, err := qtx.UpdateWorkflowStepState(ctx, db.UpdateWorkflowStepStateParams{
 		ID:     step.ID,
-		Status: pgtype.Text{String: newStatus, Valid: true},
+		Status: pgtype.Text{String: "awaiting_approval", Valid: true},
 	}); err != nil {
 		return err
 	}
 	if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
 		ID:     run.ID,
-		Status: runStatus,
-		Phase:  runPhase,
+		Status: pgtype.Text{String: "awaiting_handoff_approval", Valid: true},
+		Phase:  pgtype.Text{String: "handoff_review", Valid: true},
 	}); err != nil {
 		return err
-	}
-	if newStatus == "completed" {
-		if err := s.promoteDownstreamReadyStepsTx(ctx, qtx, run.ID, step.ID); err != nil {
-			return err
-		}
-		if err := s.scheduleReadyStepsTx(ctx, qtx, run.ID); err != nil {
-			return err
-		}
-		allDone, err := s.allExecutionStepsCompletedTx(ctx, qtx, run.ID)
-		if err != nil {
-			return err
-		}
-		if allDone {
-			if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
-				ID:     run.ID,
-				Status: pgtype.Text{String: "completed", Valid: true},
-				Phase:  pgtype.Text{String: "completed", Valid: true},
-			}); err != nil {
-				return err
-			}
-		}
 	}
 	if _, err := qtx.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
 		WorkflowRunID:  run.ID,
 		WorkflowStepID: step.ID,
 		EventType:      "step.completed",
 		Payload: mustJSON(map[string]any{
-			"role":   step.Role,
-			"status": newStatus,
+			"role":   "coder",
+			"status": "awaiting_approval",
 		}),
 	}); err != nil {
 		return err
@@ -669,9 +878,177 @@ func (s *WorkflowService) completeExecutionStep(ctx context.Context, run db.Work
 		return err
 	}
 	s.publishWorkflowRunByID(ctx, run.ID)
-	s.publishWorkflowStepByID(ctx, run.ID, step.ID, newStatus)
-	if newStatus == "awaiting_approval" {
+	s.publishWorkflowStepByID(ctx, run.ID, step.ID, "awaiting_approval")
+	s.publishWorkflowApprovalRequest(ctx, run.ID)
+	return nil
+}
+
+func (s *WorkflowService) completeReviewerStep(ctx context.Context, run db.WorkflowRun, step db.WorkflowStep, agentID pgtype.UUID, output string) error {
+	tx, err := s.TxStarter.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	qtx := s.Queries.WithTx(tx)
+
+	// Parse reviewer output for structured review_report
+	reviewReport := parseReviewReport(output)
+	if _, err := qtx.CreateWorkflowArtifact(ctx, db.CreateWorkflowArtifactParams{
+		WorkflowRunID:    run.ID,
+		WorkflowStepID:   step.ID,
+		ArtifactType:     "review_report",
+		Summary:          truncate(reviewReport.Recommendations, 240),
+		Content:          mustJSON(reviewReport),
+		CreatedByAgentID: agentID,
+	}); err != nil {
+		return err
+	}
+
+	// Reviewer doesn't need approval - mark completed and promote downstream
+	if _, err := qtx.UpdateWorkflowStepState(ctx, db.UpdateWorkflowStepStateParams{
+		ID:     step.ID,
+		Status: pgtype.Text{String: "completed", Valid: true},
+	}); err != nil {
+		return err
+	}
+
+	if err := s.promoteDownstreamReadyStepsTx(ctx, qtx, run.ID, step.ID); err != nil {
+		return err
+	}
+	if err := s.scheduleReadyStepsTx(ctx, qtx, run.ID); err != nil {
+		return err
+	}
+
+	// Check if all execution steps are done
+	allDone, err := s.allExecutionStepsCompletedTx(ctx, qtx, run.ID)
+	if err != nil {
+		return err
+	}
+	if allDone {
+		if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
+			ID:     run.ID,
+			Status: pgtype.Text{String: "completed", Valid: true},
+			Phase:  pgtype.Text{String: "completed", Valid: true},
+		}); err != nil {
+			return err
+		}
+	} else {
+		// Keep in executing state
+		if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
+			ID:     run.ID,
+			Status: pgtype.Text{String: "executing", Valid: true},
+			Phase:  pgtype.Text{String: "execution", Valid: true},
+		}); err != nil {
+			return err
+		}
+	}
+
+	if _, err := qtx.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
+		WorkflowRunID:  run.ID,
+		WorkflowStepID: step.ID,
+		EventType:      "step.completed",
+		Payload: mustJSON(map[string]any{
+			"role":   "reviewer",
+			"status": "completed",
+		}),
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.publishWorkflowRunByID(ctx, run.ID)
+	s.publishWorkflowStepByID(ctx, run.ID, step.ID, "completed")
+	return nil
+}
+
+func (s *WorkflowService) completeTesterStep(ctx context.Context, run db.WorkflowRun, step db.WorkflowStep, agentID pgtype.UUID, output string) error {
+	tx, err := s.TxStarter.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	qtx := s.Queries.WithTx(tx)
+
+	// Parse tester output for structured test_report
+	testReport := parseTestReport(output)
+	if _, err := qtx.CreateWorkflowArtifact(ctx, db.CreateWorkflowArtifactParams{
+		WorkflowRunID:    run.ID,
+		WorkflowStepID:   step.ID,
+		ArtifactType:     "test_report",
+		Summary:          truncate(fmt.Sprintf("%s: %d/%d tests passed", testReport.Status, testReport.TestsPassed, testReport.TestsRun), 240),
+		Content:          mustJSON(testReport),
+		CreatedByAgentID: agentID,
+	}); err != nil {
+		return err
+	}
+
+	// Tester may require approval (finalize scope) based on step configuration
+	if step.RequiresApproval {
+		if _, err := qtx.CreateWorkflowApproval(ctx, db.CreateWorkflowApprovalParams{
+			WorkflowRunID:  run.ID,
+			Scope:          "finalize",
+			Status:         "pending",
+			Comment:        "Review the test results before creating the pull request.",
+			WorkflowStepID: step.ID,
+		}); err != nil {
+			return err
+		}
+		if _, err := qtx.UpdateWorkflowStepState(ctx, db.UpdateWorkflowStepStateParams{
+			ID:     step.ID,
+			Status: pgtype.Text{String: "awaiting_approval", Valid: true},
+		}); err != nil {
+			return err
+		}
+		if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
+			ID:     run.ID,
+			Status: pgtype.Text{String: "awaiting_handoff_approval", Valid: true},
+			Phase:  pgtype.Text{String: "finalize_review", Valid: true},
+		}); err != nil {
+			return err
+		}
+		if _, err := qtx.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
+			WorkflowRunID:  run.ID,
+			WorkflowStepID: step.ID,
+			EventType:      "step.completed",
+			Payload: mustJSON(map[string]any{
+				"role":   "tester",
+				"status": "awaiting_approval",
+			}),
+		}); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		s.publishWorkflowRunByID(ctx, run.ID)
+		s.publishWorkflowStepByID(ctx, run.ID, step.ID, "awaiting_approval")
 		s.publishWorkflowApprovalRequest(ctx, run.ID)
+	} else {
+		// No approval required - trigger PR creation directly
+		if _, err := qtx.UpdateWorkflowStepState(ctx, db.UpdateWorkflowStepStateParams{
+			ID:     step.ID,
+			Status: pgtype.Text{String: "completed", Valid: true},
+		}); err != nil {
+			return err
+		}
+		if _, err := qtx.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
+			WorkflowRunID:  run.ID,
+			WorkflowStepID: step.ID,
+			EventType:      "step.completed",
+			Payload: mustJSON(map[string]any{
+				"role":   "tester",
+				"status": "completed",
+			}),
+		}); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		s.publishWorkflowRunByID(ctx, run.ID)
+		s.publishWorkflowStepByID(ctx, run.ID, step.ID, "completed")
+		// TODO: Trigger PR creation here when implemented
 	}
 	return nil
 }
@@ -747,6 +1124,15 @@ func (s *WorkflowService) bootstrapExecutionStepsTx(ctx context.Context, qtx *db
 			continue
 		}
 		if inbound[util.UUIDToString(step.ID)] > 0 {
+			continue
+		}
+		if step.RequiresApproval {
+			if _, err := qtx.UpdateWorkflowStepState(ctx, db.UpdateWorkflowStepStateParams{
+				ID:     step.ID,
+				Status: pgtype.Text{String: "awaiting_approval", Valid: true},
+			}); err != nil {
+				return err
+			}
 			continue
 		}
 		agent, err := s.Queries.GetAgent(ctx, step.AssignedAgentID)
@@ -1037,6 +1423,82 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// Structured artifact types
+type DiffSummary struct {
+	FilesChanged []string `json:"files_changed"`
+	Summary      string   `json:"summary"`
+	Diff         string   `json:"diff"`
+}
+
+type ReviewIssue struct {
+	Severity string `json:"severity"`
+	File     string `json:"file"`
+	Line     int    `json:"line"`
+	Message  string `json:"message"`
+}
+
+type ReviewReport struct {
+	Status          string        `json:"status"`
+	Issues          []ReviewIssue `json:"issues"`
+	Recommendations string        `json:"recommendations"`
+}
+
+type TestFailure struct {
+	TestName   string `json:"test_name"`
+	Error      string `json:"error"`
+	StackTrace string `json:"stack_trace"`
+}
+
+type TestReport struct {
+	Status      string        `json:"status"`
+	TestsRun    int           `json:"tests_run"`
+	TestsPassed int           `json:"tests_passed"`
+	Failures    []TestFailure `json:"failures"`
+}
+
+func parseDiffSummary(output string) DiffSummary {
+	var summary DiffSummary
+	// Try to parse as JSON first
+	if err := json.Unmarshal([]byte(output), &summary); err == nil {
+		return summary
+	}
+	// Fallback: treat entire output as unstructured diff
+	return DiffSummary{
+		FilesChanged: []string{},
+		Summary:      truncate(output, 240),
+		Diff:         output,
+	}
+}
+
+func parseReviewReport(output string) ReviewReport {
+	var report ReviewReport
+	// Try to parse as JSON first
+	if err := json.Unmarshal([]byte(output), &report); err == nil {
+		return report
+	}
+	// Fallback: treat as unstructured review
+	return ReviewReport{
+		Status:          "needs_review",
+		Issues:          []ReviewIssue{},
+		Recommendations: output,
+	}
+}
+
+func parseTestReport(output string) TestReport {
+	var report TestReport
+	// Try to parse as JSON first
+	if err := json.Unmarshal([]byte(output), &report); err == nil {
+		return report
+	}
+	// Fallback: treat as unstructured test output
+	return TestReport{
+		Status:      "unknown",
+		TestsRun:    0,
+		TestsPassed: 0,
+		Failures:    []TestFailure{},
+	}
 }
 
 func truncate(s string, limit int) string {

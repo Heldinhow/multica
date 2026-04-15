@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -26,6 +27,7 @@ type WorkflowRunResponse struct {
 	MaxReplans        int32                      `json:"max_replans"`
 	MaxRetriesPerStep int32                      `json:"max_retries_per_step"`
 	ReplanCount       int32                      `json:"replan_count"`
+	RunMode           string                     `json:"run_mode"`
 	CreatedAt         string                     `json:"created_at"`
 	UpdatedAt         string                     `json:"updated_at"`
 	Steps             []WorkflowStepResponse     `json:"steps,omitempty"`
@@ -128,6 +130,7 @@ func workflowRunToResponse(run db.WorkflowRun) WorkflowRunResponse {
 		MaxReplans:        run.MaxReplans,
 		MaxRetriesPerStep: run.MaxRetriesPerStep,
 		ReplanCount:       run.ReplanCount,
+		RunMode:           run.RunMode,
 		CreatedAt:         timestampToString(run.CreatedAt),
 		UpdatedAt:         timestampToString(run.UpdatedAt),
 	}
@@ -324,7 +327,20 @@ func (h *Handler) CreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	run, _, err := h.WorkflowService.CreateRun(r.Context(), issue, parseUUID(userID))
+
+	var req struct {
+		RunMode string `json:"run_mode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	runMode := req.RunMode
+	if runMode == "" {
+		runMode = "planning_plus_execution"
+	}
+
+	run, _, err := h.WorkflowService.CreateRun(r.Context(), issue, parseUUID(userID), runMode)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -458,6 +474,29 @@ func (h *Handler) CancelWorkflowRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.WorkflowService.Cancel(r.Context(), run); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to cancel workflow")
+		return
+	}
+	updated, err := h.Queries.GetWorkflowRun(r.Context(), run.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load workflow")
+		return
+	}
+	resp, err := h.buildWorkflowRunResponse(r, updated)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to build workflow response")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) StartWorkflowExecution(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "runId")
+	run, ok := h.loadWorkflowRunForUser(w, r, runID)
+	if !ok {
+		return
+	}
+	if err := h.WorkflowService.StartExecution(r.Context(), run); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	updated, err := h.Queries.GetWorkflowRun(r.Context(), run.ID)

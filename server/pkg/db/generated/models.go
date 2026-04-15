@@ -418,6 +418,7 @@ type WorkflowRun struct {
 	ReplanCount       int32              `json:"replan_count"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+	RunMode           string             `json:"run_mode"`
 }
 
 type WorkflowStep struct {
