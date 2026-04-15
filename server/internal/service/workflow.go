@@ -204,16 +204,27 @@ func (s *WorkflowService) Approve(ctx context.Context, run db.WorkflowRun, appro
 				return err
 			}
 		}
-		if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
-			ID:             run.ID,
-			Status:         pgtype.Text{String: "executing", Valid: true},
-			Phase:          pgtype.Text{String: "execution", Valid: true},
-			ApprovedPlanAt: nowUTC(),
-		}); err != nil {
-			return err
-		}
-		if err := s.bootstrapExecutionStepsTx(ctx, qtx, run.ID); err != nil {
-			return err
+		switch run.RunMode {
+		case "planning_only":
+			if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
+				ID:             run.ID,
+				Status:         pgtype.Text{String: "planning_complete", Valid: true},
+				Phase:          pgtype.Text{String: "planning_complete", Valid: true},
+				ApprovedPlanAt: nowUTC(),
+			}); err != nil {
+				return err
+			}
+		case "planning_plus_execution":
+			if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
+				ID:             run.ID,
+				Status:         pgtype.Text{String: "execution_ready", Valid: true},
+				Phase:          pgtype.Text{String: "execution_ready", Valid: true},
+				ApprovedPlanAt: nowUTC(),
+			}); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unknown run mode: %q", run.RunMode)
 		}
 	case "handoff":
 		if approval.WorkflowStepID.Valid {
@@ -273,6 +284,38 @@ func (s *WorkflowService) Approve(ctx context.Context, run db.WorkflowRun, appro
 	s.publishWorkflowEvent(run, approval.WorkflowStepID, "workflow:event_created", map[string]any{
 		"event_type": "approval.approved",
 	})
+	return nil
+}
+
+func (s *WorkflowService) StartExecution(ctx context.Context, run db.WorkflowRun) error {
+	if run.RunMode != "planning_plus_execution" {
+		return fmt.Errorf("StartExecution is only valid for planning_plus_execution runs")
+	}
+	if run.Status != "execution_ready" {
+		return fmt.Errorf("workflow run must be in execution_ready status to start execution")
+	}
+
+	tx, err := s.TxStarter.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	qtx := s.Queries.WithTx(tx)
+
+	if err := s.bootstrapExecutionStepsTx(ctx, qtx, run.ID); err != nil {
+		return err
+	}
+	if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
+		ID:     run.ID,
+		Status: pgtype.Text{String: "executing", Valid: true},
+		Phase:  pgtype.Text{String: "execution", Valid: true},
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.publishWorkflowRunByID(ctx, run.ID)
 	return nil
 }
 

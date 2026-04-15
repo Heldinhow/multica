@@ -534,6 +534,12 @@ export class ApiClient {
     });
   }
 
+  async startWorkflowExecution(runId: string): Promise<WorkflowRun> {
+    return this.fetch(`/api/workflows/${runId}/start`, {
+      method: "POST",
+    });
+  }
+
   // Inbox
   async listInbox(): Promise<InboxItem[]> {
     return this.fetch("/api/inbox");

@@ -489,6 +489,29 @@ func (h *Handler) CancelWorkflowRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func (h *Handler) StartWorkflowExecution(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "runId")
+	run, ok := h.loadWorkflowRunForUser(w, r, runID)
+	if !ok {
+		return
+	}
+	if err := h.WorkflowService.StartExecution(r.Context(), run); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	updated, err := h.Queries.GetWorkflowRun(r.Context(), run.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load workflow")
+		return
+	}
+	resp, err := h.buildWorkflowRunResponse(r, updated)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to build workflow response")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func isNoRows(err error) bool {
 	return errors.Is(err, pgx.ErrNoRows)
 }
