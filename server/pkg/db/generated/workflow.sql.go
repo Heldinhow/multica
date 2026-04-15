@@ -141,7 +141,7 @@ INSERT INTO workflow_run (
     $1, $2, $3, $4, $5, $6, $7,
     $8, $9, $10, $11
 )
-RETURNING id, workspace_id, issue_id, status, phase, plan_version, token_budget, base_branch, created_by, approved_plan_at, cancelled_at, max_steps, max_replans, max_retries_per_step, replan_count, created_at, updated_at
+RETURNING id, workspace_id, issue_id, status, phase, plan_version, token_budget, base_branch, created_by, approved_plan_at, cancelled_at, max_steps, max_replans, max_retries_per_step, replan_count, created_at, updated_at, run_mode, current_stage
 `
 
 type CreateWorkflowRunParams struct {
@@ -191,6 +191,8 @@ func (q *Queries) CreateWorkflowRun(ctx context.Context, arg CreateWorkflowRunPa
 		&i.ReplanCount,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RunMode,
+		&i.CurrentStage,
 	)
 	return i, err
 }
@@ -291,9 +293,19 @@ func (q *Queries) CreateWorkflowStepEdge(ctx context.Context, arg CreateWorkflow
 }
 
 const getActiveWorkflowRunByIssue = `-- name: GetActiveWorkflowRunByIssue :one
-SELECT id, workspace_id, issue_id, status, phase, plan_version, token_budget, base_branch, created_by, approved_plan_at, cancelled_at, max_steps, max_replans, max_retries_per_step, replan_count, created_at, updated_at FROM workflow_run
+SELECT id, workspace_id, issue_id, status, phase, plan_version, token_budget, base_branch, created_by, approved_plan_at, cancelled_at, max_steps, max_replans, max_retries_per_step, replan_count, created_at, updated_at, run_mode, current_stage FROM workflow_run
 WHERE issue_id = $1
-  AND status IN ('planning', 'awaiting_plan_approval', 'executing', 'awaiting_handoff_approval', 'blocked')
+  AND status IN (
+    'planning',
+    'in_artifact_review',
+    'awaiting_plan_approval',
+    'execution_ready',
+    'executing',
+    'awaiting_handoff_approval',
+    'in_code_review',
+    'in_pr_creation',
+    'blocked'
+  )
 ORDER BY created_at DESC
 LIMIT 1
 `
@@ -319,6 +331,8 @@ func (q *Queries) GetActiveWorkflowRunByIssue(ctx context.Context, issueID pgtyp
 		&i.ReplanCount,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RunMode,
+		&i.CurrentStage,
 	)
 	return i, err
 }
@@ -348,7 +362,7 @@ func (q *Queries) GetWorkflowApproval(ctx context.Context, id pgtype.UUID) (Work
 }
 
 const getWorkflowRun = `-- name: GetWorkflowRun :one
-SELECT id, workspace_id, issue_id, status, phase, plan_version, token_budget, base_branch, created_by, approved_plan_at, cancelled_at, max_steps, max_replans, max_retries_per_step, replan_count, created_at, updated_at FROM workflow_run
+SELECT id, workspace_id, issue_id, status, phase, plan_version, token_budget, base_branch, created_by, approved_plan_at, cancelled_at, max_steps, max_replans, max_retries_per_step, replan_count, created_at, updated_at, run_mode, current_stage FROM workflow_run
 WHERE id = $1
 `
 
@@ -373,6 +387,8 @@ func (q *Queries) GetWorkflowRun(ctx context.Context, id pgtype.UUID) (WorkflowR
 		&i.ReplanCount,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RunMode,
+		&i.CurrentStage,
 	)
 	return i, err
 }
@@ -514,7 +530,7 @@ func (q *Queries) ListWorkflowEventsByRun(ctx context.Context, workflowRunID pgt
 }
 
 const listWorkflowRunsByIssue = `-- name: ListWorkflowRunsByIssue :many
-SELECT id, workspace_id, issue_id, status, phase, plan_version, token_budget, base_branch, created_by, approved_plan_at, cancelled_at, max_steps, max_replans, max_retries_per_step, replan_count, created_at, updated_at FROM workflow_run
+SELECT id, workspace_id, issue_id, status, phase, plan_version, token_budget, base_branch, created_by, approved_plan_at, cancelled_at, max_steps, max_replans, max_retries_per_step, replan_count, created_at, updated_at, run_mode, current_stage FROM workflow_run
 WHERE issue_id = $1
 ORDER BY created_at DESC
 `
@@ -546,6 +562,8 @@ func (q *Queries) ListWorkflowRunsByIssue(ctx context.Context, issueID pgtype.UU
 			&i.ReplanCount,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.RunMode,
+			&i.CurrentStage,
 		); err != nil {
 			return nil, err
 		}
@@ -675,6 +693,59 @@ func (q *Queries) ResolveWorkflowApproval(ctx context.Context, arg ResolveWorkfl
 	return i, err
 }
 
+const updateWorkflowRunStage = `-- name: UpdateWorkflowRunStage :one
+UPDATE workflow_run
+SET
+    current_stage = $2,
+    status = $3,
+    run_mode = COALESCE($4, run_mode),
+    replan_count = COALESCE($5, replan_count),
+    updated_at = now()
+WHERE id = $1
+RETURNING id, workspace_id, issue_id, status, phase, plan_version, token_budget, base_branch, created_by, approved_plan_at, cancelled_at, max_steps, max_replans, max_retries_per_step, replan_count, created_at, updated_at, run_mode, current_stage
+`
+
+type UpdateWorkflowRunStageParams struct {
+	ID           pgtype.UUID `json:"id"`
+	CurrentStage string      `json:"current_stage"`
+	Status       string      `json:"status"`
+	RunMode      pgtype.Text `json:"run_mode"`
+	ReplanCount  pgtype.Int4 `json:"replan_count"`
+}
+
+func (q *Queries) UpdateWorkflowRunStage(ctx context.Context, arg UpdateWorkflowRunStageParams) (WorkflowRun, error) {
+	row := q.db.QueryRow(ctx, updateWorkflowRunStage,
+		arg.ID,
+		arg.CurrentStage,
+		arg.Status,
+		arg.RunMode,
+		arg.ReplanCount,
+	)
+	var i WorkflowRun
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.IssueID,
+		&i.Status,
+		&i.Phase,
+		&i.PlanVersion,
+		&i.TokenBudget,
+		&i.BaseBranch,
+		&i.CreatedBy,
+		&i.ApprovedPlanAt,
+		&i.CancelledAt,
+		&i.MaxSteps,
+		&i.MaxReplans,
+		&i.MaxRetriesPerStep,
+		&i.ReplanCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.RunMode,
+		&i.CurrentStage,
+	)
+	return i, err
+}
+
 const updateWorkflowRunState = `-- name: UpdateWorkflowRunState :one
 UPDATE workflow_run
 SET
@@ -686,7 +757,7 @@ SET
     replan_count = COALESCE($7, replan_count),
     updated_at = now()
 WHERE id = $1
-RETURNING id, workspace_id, issue_id, status, phase, plan_version, token_budget, base_branch, created_by, approved_plan_at, cancelled_at, max_steps, max_replans, max_retries_per_step, replan_count, created_at, updated_at
+RETURNING id, workspace_id, issue_id, status, phase, plan_version, token_budget, base_branch, created_by, approved_plan_at, cancelled_at, max_steps, max_replans, max_retries_per_step, replan_count, created_at, updated_at, run_mode, current_stage
 `
 
 type UpdateWorkflowRunStateParams struct {
@@ -728,6 +799,8 @@ func (q *Queries) UpdateWorkflowRunState(ctx context.Context, arg UpdateWorkflow
 		&i.ReplanCount,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RunMode,
+		&i.CurrentStage,
 	)
 	return i, err
 }

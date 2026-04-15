@@ -16,6 +16,8 @@ type WorkflowRunResponse struct {
 	IssueID           string                     `json:"issue_id"`
 	Status            string                     `json:"status"`
 	Phase             string                     `json:"phase"`
+	RunMode           string                     `json:"run_mode"`
+	CurrentStage      string                     `json:"current_stage"`
 	PlanVersion       int32                      `json:"plan_version"`
 	TokenBudget       int64                      `json:"token_budget"`
 	BaseBranch        string                     `json:"base_branch"`
@@ -118,6 +120,8 @@ func workflowRunToResponse(run db.WorkflowRun) WorkflowRunResponse {
 		IssueID:           uuidToString(run.IssueID),
 		Status:            run.Status,
 		Phase:             run.Phase,
+		RunMode:           run.RunMode,
+		CurrentStage:      run.CurrentStage,
 		PlanVersion:       run.PlanVersion,
 		TokenBudget:       run.TokenBudget,
 		BaseBranch:        run.BaseBranch,
@@ -463,6 +467,29 @@ func (h *Handler) CancelWorkflowRun(w http.ResponseWriter, r *http.Request) {
 	updated, err := h.Queries.GetWorkflowRun(r.Context(), run.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load workflow")
+		return
+	}
+	resp, err := h.buildWorkflowRunResponse(r, updated)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to build workflow response")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) StartWorkflowExecution(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "runId")
+	run, ok := h.loadWorkflowRunForUser(w, r, runID)
+	if !ok {
+		return
+	}
+	if run.CurrentStage != "hitl_plan_approval" {
+		writeError(w, http.StatusBadRequest, "execution can only start after plan approval (current stage: "+run.CurrentStage+")")
+		return
+	}
+	updated, err := h.WorkflowService.StartExecution(r.Context(), run)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	resp, err := h.buildWorkflowRunResponse(r, updated)

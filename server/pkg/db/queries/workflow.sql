@@ -20,7 +20,17 @@ ORDER BY created_at DESC;
 -- name: GetActiveWorkflowRunByIssue :one
 SELECT * FROM workflow_run
 WHERE issue_id = $1
-  AND status IN ('planning', 'awaiting_plan_approval', 'executing', 'awaiting_handoff_approval', 'blocked')
+  AND status IN (
+    'planning',
+    'in_artifact_review',
+    'awaiting_plan_approval',
+    'execution_ready',
+    'executing',
+    'awaiting_handoff_approval',
+    'in_code_review',
+    'in_pr_creation',
+    'blocked'
+  )
 ORDER BY created_at DESC
 LIMIT 1;
 
@@ -32,6 +42,17 @@ SET
     plan_version = COALESCE(sqlc.narg('plan_version'), plan_version),
     approved_plan_at = COALESCE(sqlc.narg('approved_plan_at'), approved_plan_at),
     cancelled_at = COALESCE(sqlc.narg('cancelled_at'), cancelled_at),
+    replan_count = COALESCE(sqlc.narg('replan_count'), replan_count),
+    updated_at = now()
+WHERE id = $1
+RETURNING *;
+
+-- name: UpdateWorkflowRunStage :one
+UPDATE workflow_run
+SET
+    current_stage = $2,
+    status = $3,
+    run_mode = COALESCE(sqlc.narg('run_mode'), run_mode),
     replan_count = COALESCE(sqlc.narg('replan_count'), replan_count),
     updated_at = now()
 WHERE id = $1

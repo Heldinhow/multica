@@ -240,6 +240,7 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus) chi.Route
 			r.Route("/api/workflows/{runId}", func(r chi.Router) {
 				r.Get("/", h.GetWorkflowRun)
 				r.Post("/cancel", h.CancelWorkflowRun)
+				r.Post("/start-execution", h.StartWorkflowExecution)
 				r.Post("/approvals/{approvalId}/approve", h.ApproveWorkflowApproval)
 				r.Post("/approvals/{approvalId}/reject", h.RejectWorkflowApproval)
 			})

@@ -62,6 +62,49 @@ type WorkflowPlanEdge struct {
 	To   string `json:"to"`
 }
 
+// allowedTransitions defines the valid SDD stage machine transitions.
+// Any transition not listed here is rejected by TransitionStage.
+var allowedTransitions = map[string][]string{
+	"intake":             {"planning_specify"},
+	"planning_specify":   {"planning_plan", "planning_clarify"},
+	"planning_clarify":   {"planning_plan"},
+	"planning_plan":      {"planning_tasks"},
+	"planning_tasks":     {"artifact_review"},
+	"artifact_review":    {"hitl_plan_approval", "planning_plan", "planning_clarify"},
+	"hitl_plan_approval": {"execution_ready", "planning_plan", "planning_tasks"},
+	"execution_ready":    {"execution"},
+	"execution":          {"code_review"},
+	"code_review":        {"pr_creation", "execution"},
+	"pr_creation":        {"final_hitl"},
+	"final_hitl":         {"done", "code_review", "execution"},
+	"done":               {},
+}
+
+// stageToStatus maps the SDD stage to the corresponding workflow_run.status.
+var stageToStatus = map[string]string{
+	"intake":             "planning",
+	"planning_specify":   "planning",
+	"planning_clarify":   "planning",
+	"planning_plan":      "planning",
+	"planning_tasks":     "planning",
+	"artifact_review":    "in_artifact_review",
+	"hitl_plan_approval": "awaiting_plan_approval",
+	"execution_ready":    "execution_ready",
+	"execution":          "executing",
+	"code_review":        "in_code_review",
+	"pr_creation":        "in_pr_creation",
+	"final_hitl":         "awaiting_handoff_approval",
+	"done":               "completed",
+}
+
+// stageRejectionTarget maps each review/approval stage to its default rollback target.
+var stageRejectionTarget = map[string]string{
+	"artifact_review":    "planning_plan",
+	"hitl_plan_approval": "planning_plan",
+	"code_review":        "execution",
+	"final_hitl":         "code_review",
+}
+
 func (s *WorkflowService) CreateRun(ctx context.Context, issue db.Issue, createdBy pgtype.UUID) (db.WorkflowRun, db.WorkflowStep, error) {
 	if createdBy.Valid == false {
 		return db.WorkflowRun{}, db.WorkflowStep{}, fmt.Errorf("created_by is required")
@@ -195,6 +238,9 @@ func (s *WorkflowService) Approve(ctx context.Context, run db.WorkflowRun, appro
 
 	switch approval.Scope {
 	case "plan":
+		// Plan approval moves the workflow to hitl_plan_approval stage.
+		// Execution is NOT started automatically — the operator must call
+		// StartExecution explicitly via POST /workflows/:runId/start-execution.
 		if approval.WorkflowStepID.Valid {
 			if _, err := qtx.UpdateWorkflowStepState(ctx, db.UpdateWorkflowStepStateParams{
 				ID:     approval.WorkflowStepID,
@@ -203,15 +249,17 @@ func (s *WorkflowService) Approve(ctx context.Context, run db.WorkflowRun, appro
 				return err
 			}
 		}
-		if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
-			ID:             run.ID,
-			Status:         pgtype.Text{String: "executing", Valid: true},
-			Phase:          pgtype.Text{String: "execution", Valid: true},
-			ApprovedPlanAt: nowUTC(),
+		if _, err := qtx.UpdateWorkflowRunStage(ctx, db.UpdateWorkflowRunStageParams{
+			ID:           run.ID,
+			CurrentStage: "hitl_plan_approval",
+			Status:       "awaiting_plan_approval",
 		}); err != nil {
 			return err
 		}
-		if err := s.bootstrapExecutionStepsTx(ctx, qtx, run.ID); err != nil {
+		if _, err := qtx.UpdateWorkflowRunState(ctx, db.UpdateWorkflowRunStateParams{
+			ID:             run.ID,
+			ApprovedPlanAt: nowUTC(),
+		}); err != nil {
 			return err
 		}
 	case "handoff":
@@ -395,6 +443,294 @@ func (s *WorkflowService) Cancel(ctx context.Context, run db.WorkflowRun) error 
 	}
 	s.publishWorkflowRun(updated, "cancelled")
 	return nil
+}
+
+// TransitionStage moves a workflow run to a new SDD stage, updating status and
+// emitting an audit event. The transition must be in allowedTransitions.
+func (s *WorkflowService) TransitionStage(ctx context.Context, runID pgtype.UUID, toStage string, reason string) (db.WorkflowRun, error) {
+	run, err := s.Queries.GetWorkflowRun(ctx, runID)
+	if err != nil {
+		return db.WorkflowRun{}, fmt.Errorf("get workflow run: %w", err)
+	}
+	fromStage := run.CurrentStage
+	allowed, ok := allowedTransitions[fromStage]
+	if !ok {
+		return db.WorkflowRun{}, fmt.Errorf("unknown stage %q", fromStage)
+	}
+	if !slices.Contains(allowed, toStage) {
+		return db.WorkflowRun{}, fmt.Errorf("transition %q → %q is not allowed", fromStage, toStage)
+	}
+	newStatus, ok := stageToStatus[toStage]
+	if !ok {
+		return db.WorkflowRun{}, fmt.Errorf("no status mapping for stage %q", toStage)
+	}
+	updated, err := s.Queries.UpdateWorkflowRunStage(ctx, db.UpdateWorkflowRunStageParams{
+		ID:           run.ID,
+		CurrentStage: toStage,
+		Status:       newStatus,
+	})
+	if err != nil {
+		return db.WorkflowRun{}, fmt.Errorf("update workflow run stage: %w", err)
+	}
+	_, _ = s.Queries.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
+		WorkflowRunID: run.ID,
+		EventType:     "stage.transition",
+		Payload: mustJSON(map[string]any{
+			"from":   fromStage,
+			"to":     toStage,
+			"reason": reason,
+		}),
+	})
+	s.publishWorkflowRun(updated, "stage_transition")
+	return updated, nil
+}
+
+// enforceRunMode checks that a step does not violate the planning_only constraint.
+// If the run is in planning_only mode and the step requests write access, a
+// planner_violation event is recorded and an error is returned.
+func (s *WorkflowService) enforceRunMode(ctx context.Context, run db.WorkflowRun, step db.WorkflowStep) error {
+	if run.RunMode != "planning_only" {
+		return nil
+	}
+	if step.WriteScope == "read_only" || step.WriteScope == "none" {
+		return nil
+	}
+	detail := fmt.Sprintf("step %q (role=%s) requested write_scope=%q in planning_only mode", step.Title, step.Role, step.WriteScope)
+	_, _ = s.Queries.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
+		WorkflowRunID:  run.ID,
+		WorkflowStepID: step.ID,
+		EventType:      "planner_violation",
+		Payload:        mustJSON(map[string]any{"detail": detail, "step_id": util.UUIDToString(step.ID)}),
+	})
+	s.publishWorkflowRunByID(ctx, run.ID)
+	return fmt.Errorf("planner violation: %s", detail)
+}
+
+// RejectAndRollback rejects an approval and rolls the workflow back to targetStage,
+// cancelling any in-flight steps and recording a rejection event.
+func (s *WorkflowService) RejectAndRollback(ctx context.Context, run db.WorkflowRun, approval db.WorkflowApproval, reviewer pgtype.UUID, comment string, targetStage string) error {
+	// Validate the rollback target is a legal transition from the current stage.
+	allowed, ok := allowedTransitions[run.CurrentStage]
+	if !ok || !slices.Contains(allowed, targetStage) {
+		// Fall back to the default rejection target if the caller didn't provide a valid one.
+		if def, hasDef := stageRejectionTarget[run.CurrentStage]; hasDef {
+			targetStage = def
+		} else {
+			return fmt.Errorf("no valid rejection target from stage %q", run.CurrentStage)
+		}
+	}
+
+	tx, err := s.TxStarter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin reject+rollback tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	qtx := s.Queries.WithTx(tx)
+
+	if _, err := qtx.ResolveWorkflowApproval(ctx, db.ResolveWorkflowApprovalParams{
+		ID:         approval.ID,
+		Status:     "rejected",
+		ReviewerID: reviewer,
+		Comment:    pgtype.Text{String: comment, Valid: comment != ""},
+	}); err != nil {
+		return fmt.Errorf("resolve approval: %w", err)
+	}
+
+	// Cancel all in-flight steps.
+	steps, err := qtx.ListWorkflowStepsByRun(ctx, run.ID)
+	if err != nil {
+		return fmt.Errorf("list steps: %w", err)
+	}
+	for _, step := range steps {
+		if step.Status == "completed" || step.Status == "cancelled" || step.Status == "rejected" {
+			continue
+		}
+		if _, err := qtx.UpdateWorkflowStepState(ctx, db.UpdateWorkflowStepStateParams{
+			ID:     step.ID,
+			Status: pgtype.Text{String: "cancelled", Valid: true},
+		}); err != nil {
+			return fmt.Errorf("cancel step %s: %w", util.UUIDToString(step.ID), err)
+		}
+	}
+
+	newStatus, _ := stageToStatus[targetStage]
+	var newReplanCount pgtype.Int4
+	if strings.HasPrefix(targetStage, "planning_") {
+		newReplanCount = pgtype.Int4{Int32: run.ReplanCount + 1, Valid: true}
+	}
+	if _, err := qtx.UpdateWorkflowRunStage(ctx, db.UpdateWorkflowRunStageParams{
+		ID:           run.ID,
+		CurrentStage: targetStage,
+		Status:       newStatus,
+		ReplanCount:  newReplanCount,
+	}); err != nil {
+		return fmt.Errorf("update run stage: %w", err)
+	}
+
+	if _, err := qtx.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
+		WorkflowRunID:  run.ID,
+		WorkflowStepID: approval.WorkflowStepID,
+		EventType:      "stage.rejected",
+		Payload: mustJSON(map[string]any{
+			"approval_id":   util.UUIDToString(approval.ID),
+			"scope":         approval.Scope,
+			"from_stage":    run.CurrentStage,
+			"target_stage":  targetStage,
+			"comment":       comment,
+			"replan_count":  run.ReplanCount + 1,
+		}),
+	}); err != nil {
+		return fmt.Errorf("create rejection event: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit reject+rollback: %w", err)
+	}
+	s.publishWorkflowRunByID(ctx, run.ID)
+	s.publishWorkflowApproval(run, approval, "rejected")
+	return nil
+}
+
+// WriteStateArtifact persists the current workflow state as a workflow_state
+// artifact so agents and operators can inspect the full machine state.
+func (s *WorkflowService) WriteStateArtifact(ctx context.Context, run db.WorkflowRun) error {
+	steps, err := s.Queries.ListWorkflowStepsByRun(ctx, run.ID)
+	if err != nil {
+		return fmt.Errorf("list steps for state artifact: %w", err)
+	}
+
+	progress := map[string]string{}
+	stageOrder := []string{
+		"intake", "planning_specify", "planning_clarify", "planning_plan",
+		"planning_tasks", "artifact_review", "hitl_plan_approval",
+		"execution_ready", "execution", "code_review", "pr_creation", "final_hitl", "done",
+	}
+	for _, stage := range stageOrder {
+		if stage == run.CurrentStage {
+			progress[stage] = "in_progress"
+		} else {
+			// Determine if a stage is before or after the current one.
+			stageIdx := -1
+			currentIdx := -1
+			for i, st := range stageOrder {
+				if st == stage {
+					stageIdx = i
+				}
+				if st == run.CurrentStage {
+					currentIdx = i
+				}
+			}
+			if stageIdx < currentIdx {
+				progress[stage] = "done"
+			} else {
+				progress[stage] = "pending"
+			}
+		}
+	}
+
+	rejectionTarget := ""
+	if def, ok := stageRejectionTarget[run.CurrentStage]; ok {
+		rejectionTarget = def
+	}
+
+	state := map[string]any{
+		"workflowId":        util.UUIDToString(run.ID),
+		"issueId":           util.UUIDToString(run.IssueID),
+		"currentStage":      run.CurrentStage,
+		"status":            run.Status,
+		"mode":              run.RunMode,
+		"allowedNextStages": allowedTransitions[run.CurrentStage],
+		"rejectionTarget":   rejectionTarget,
+		"progress":          progress,
+		"attempts": map[string]any{
+			"replan":         run.ReplanCount,
+			"max_replans":    run.MaxReplans,
+			"max_retries":    run.MaxRetriesPerStep,
+		},
+		"stepCount": len(steps),
+	}
+
+	content, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("marshal state: %w", err)
+	}
+
+	_, err = s.Queries.CreateWorkflowArtifact(ctx, db.CreateWorkflowArtifactParams{
+		WorkflowRunID: run.ID,
+		ArtifactType:  "workflow_state",
+		Summary:       fmt.Sprintf("Stage: %s | Status: %s | Mode: %s", run.CurrentStage, run.Status, run.RunMode),
+		Content:       content,
+	})
+	return err
+}
+
+// StartExecution transitions the workflow from hitl_plan_approval to executing,
+// switching run_mode to planning_plus_execution and bootstrapping execution steps.
+// It validates that a plan approval has been granted before proceeding.
+func (s *WorkflowService) StartExecution(ctx context.Context, run db.WorkflowRun) (db.WorkflowRun, error) {
+	if run.CurrentStage != "hitl_plan_approval" {
+		return db.WorkflowRun{}, fmt.Errorf("cannot start execution from stage %q: must be in hitl_plan_approval", run.CurrentStage)
+	}
+	if run.RunMode != "planning_only" {
+		return db.WorkflowRun{}, fmt.Errorf("workflow is already in execution mode")
+	}
+
+	// Verify a plan approval exists and is approved.
+	approvals, err := s.Queries.ListWorkflowApprovalsByRun(ctx, run.ID)
+	if err != nil {
+		return db.WorkflowRun{}, fmt.Errorf("list approvals: %w", err)
+	}
+	hasPlanApproval := false
+	for _, a := range approvals {
+		if a.Scope == "plan" && a.Status == "approved" {
+			hasPlanApproval = true
+			break
+		}
+	}
+	if !hasPlanApproval {
+		return db.WorkflowRun{}, fmt.Errorf("plan approval is required before starting execution")
+	}
+
+	tx, err := s.TxStarter.Begin(ctx)
+	if err != nil {
+		return db.WorkflowRun{}, fmt.Errorf("begin start-execution tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	qtx := s.Queries.WithTx(tx)
+
+	// Transition run_mode and stage in one update.
+	updated, err := qtx.UpdateWorkflowRunStage(ctx, db.UpdateWorkflowRunStageParams{
+		ID:           run.ID,
+		CurrentStage: "execution",
+		Status:       "executing",
+		RunMode:      pgtype.Text{String: "planning_plus_execution", Valid: true},
+	})
+	if err != nil {
+		return db.WorkflowRun{}, fmt.Errorf("update run stage to execution: %w", err)
+	}
+
+	if err := s.bootstrapExecutionStepsTx(ctx, qtx, run.ID); err != nil {
+		return db.WorkflowRun{}, fmt.Errorf("bootstrap execution steps: %w", err)
+	}
+
+	if _, err := qtx.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
+		WorkflowRunID: run.ID,
+		EventType:     "stage.transition",
+		Payload: mustJSON(map[string]any{
+			"from":   "hitl_plan_approval",
+			"to":     "execution",
+			"reason": "human approved — start execution",
+		}),
+	}); err != nil {
+		return db.WorkflowRun{}, fmt.Errorf("create start-execution event: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return db.WorkflowRun{}, fmt.Errorf("commit start-execution: %w", err)
+	}
+
+	s.publishWorkflowRun(updated, "stage_transition")
+	return updated, nil
 }
 
 func (s *WorkflowService) HandleTaskCompletion(ctx context.Context, task db.AgentTaskQueue, output string) error {

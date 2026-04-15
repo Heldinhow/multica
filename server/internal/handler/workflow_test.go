@@ -140,17 +140,80 @@ func TestWorkflowLifecycle_CreatePlanApprove(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&approved); err != nil {
 		t.Fatalf("decode approved workflow: %v", err)
 	}
-	if approved.Status != "executing" {
-		t.Fatalf("ApproveWorkflowApproval: expected executing status, got %q", approved.Status)
+	// Approving the plan now moves to hitl_plan_approval stage (awaiting_plan_approval status).
+	// Execution only starts when the operator calls POST /start-execution explicitly.
+	if approved.Status != "awaiting_plan_approval" {
+		t.Fatalf("ApproveWorkflowApproval: expected awaiting_plan_approval, got %q", approved.Status)
+	}
+	if approved.CurrentStage != "hitl_plan_approval" {
+		t.Fatalf("ApproveWorkflowApproval: expected hitl_plan_approval stage, got %q", approved.CurrentStage)
+	}
+	if approved.RunMode != "planning_only" {
+		t.Fatalf("ApproveWorkflowApproval: expected planning_only run_mode, got %q", approved.RunMode)
+	}
+
+	// Start execution via the explicit endpoint.
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/workflows/"+runID+"/start-execution?workspace_id="+testWorkspaceID, nil)
+	req = withURLParam(req, "runId", runID)
+	testHandler.StartWorkflowExecution(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("StartWorkflowExecution: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var executing WorkflowRunResponse
+	if err := json.NewDecoder(w.Body).Decode(&executing); err != nil {
+		t.Fatalf("decode executing workflow: %v", err)
+	}
+	if executing.Status != "executing" {
+		t.Fatalf("StartWorkflowExecution: expected executing status, got %q", executing.Status)
+	}
+	if executing.RunMode != "planning_plus_execution" {
+		t.Fatalf("StartWorkflowExecution: expected planning_plus_execution run_mode, got %q", executing.RunMode)
 	}
 	coderQueued := false
-	for _, step := range approved.Steps {
+	for _, step := range executing.Steps {
 		if step.Role == "coder" && step.Status == "queued" {
 			coderQueued = true
 		}
 	}
 	if !coderQueued {
-		t.Fatalf("expected coder step to be queued after approval, got %+v", approved.Steps)
+		t.Fatalf("expected coder step to be queued after start-execution, got %+v", executing.Steps)
+	}
+}
+
+func TestStartWorkflowExecution_RequiresPlanApproval(t *testing.T) {
+	// Create issue and workflow.
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":    "Execution gate test",
+		"status":   "todo",
+		"priority": "medium",
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue: expected 201, got %d", w.Code)
+	}
+	var issue IssueResponse
+	json.NewDecoder(w.Body).Decode(&issue) //nolint:errcheck
+
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/issues/"+issue.ID+"/workflows", nil)
+	req = withURLParam(req, "id", issue.ID)
+	testHandler.CreateWorkflow(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateWorkflow: expected 201, got %d", w.Code)
+	}
+	var run WorkflowRunResponse
+	json.NewDecoder(w.Body).Decode(&run) //nolint:errcheck
+
+	// Attempt start-execution while still in 'planning' stage — must fail.
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/workflows/"+run.ID+"/start-execution?workspace_id="+testWorkspaceID, nil)
+	req = withURLParam(req, "runId", run.ID)
+	testHandler.StartWorkflowExecution(w, req)
+	if w.Code == http.StatusOK {
+		t.Fatal("StartWorkflowExecution: expected failure when plan is not yet approved, got 200")
 	}
 }
 
