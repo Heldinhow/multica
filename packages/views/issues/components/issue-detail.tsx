@@ -64,6 +64,7 @@ import { ProjectPicker } from "../../projects/components/project-picker";
 import { CommentCard } from "./comment-card";
 import { CommentInput } from "./comment-input";
 import { AgentLiveCard, TaskRunHistory } from "./agent-live-card";
+import { WorkflowPanel } from "./workflow-panel";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "@multica/core/auth";
 import { useWorkspaceStore } from "@multica/core/workspace";
@@ -1181,6 +1182,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
 
             {/* Agent live output — sticky inside the Activity section so it
                 stays pinned while scrolling through TaskRunHistory + comments. */}
+            <WorkflowPanel issueId={id} />
             <AgentLiveCard issueId={id} />
 
             {/* Agent execution history */}

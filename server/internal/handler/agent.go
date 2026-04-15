@@ -27,6 +27,9 @@ type AgentResponse struct {
 	Visibility         string            `json:"visibility"`
 	Status             string            `json:"status"`
 	MaxConcurrentTasks int32             `json:"max_concurrent_tasks"`
+	WorkflowRoles      []string          `json:"workflow_roles"`
+	Capabilities       []string          `json:"capabilities"`
+	ToolPolicy         any               `json:"tool_policy"`
 	OwnerID            *string           `json:"owner_id"`
 	Skills             []SkillResponse   `json:"skills"`
 	CreatedAt          string            `json:"created_at"`
@@ -54,6 +57,26 @@ func agentToResponse(a db.Agent) AgentResponse {
 		customEnv = map[string]string{}
 	}
 
+	var capabilities []string
+	if a.Capabilities != nil {
+		if err := json.Unmarshal(a.Capabilities, &capabilities); err != nil {
+			slog.Warn("failed to unmarshal agent capabilities", "agent_id", uuidToString(a.ID), "error", err)
+		}
+	}
+	if capabilities == nil {
+		capabilities = []string{}
+	}
+
+	var toolPolicy any
+	if a.ToolPolicy != nil {
+		if err := json.Unmarshal(a.ToolPolicy, &toolPolicy); err != nil {
+			slog.Warn("failed to unmarshal agent tool_policy", "agent_id", uuidToString(a.ID), "error", err)
+		}
+	}
+	if toolPolicy == nil {
+		toolPolicy = map[string]any{}
+	}
+
 	return AgentResponse{
 		ID:                 uuidToString(a.ID),
 		WorkspaceID:        uuidToString(a.WorkspaceID),
@@ -68,6 +91,9 @@ func agentToResponse(a db.Agent) AgentResponse {
 		Visibility:         a.Visibility,
 		Status:             a.Status,
 		MaxConcurrentTasks: a.MaxConcurrentTasks,
+		WorkflowRoles:      a.WorkflowRoles,
+		Capabilities:       capabilities,
+		ToolPolicy:         toolPolicy,
 		OwnerID:            uuidToPtr(a.OwnerID),
 		Skills:             []SkillResponse{},
 		CreatedAt:          timestampToString(a.CreatedAt),
@@ -85,27 +111,30 @@ type RepoData struct {
 }
 
 type AgentTaskResponse struct {
-	ID             string         `json:"id"`
-	AgentID        string         `json:"agent_id"`
-	RuntimeID      string         `json:"runtime_id"`
-	IssueID        string         `json:"issue_id"`
-	WorkspaceID    string         `json:"workspace_id"`
-	Status         string         `json:"status"`
-	Priority       int32          `json:"priority"`
-	DispatchedAt   *string        `json:"dispatched_at"`
-	StartedAt      *string        `json:"started_at"`
-	CompletedAt    *string        `json:"completed_at"`
-	Result         any            `json:"result"`
-	Error          *string        `json:"error"`
-	Agent          *TaskAgentData `json:"agent,omitempty"`
-	Repos          []RepoData     `json:"repos,omitempty"`
-	CreatedAt      string         `json:"created_at"`
-	PriorSessionID   string         `json:"prior_session_id,omitempty"`    // session ID from a previous task on same issue
-	PriorWorkDir     string         `json:"prior_work_dir,omitempty"`     // work_dir from a previous task on same issue
-	TriggerCommentID      *string        `json:"trigger_comment_id,omitempty"`      // comment that triggered this task
-	TriggerCommentContent string         `json:"trigger_comment_content,omitempty"` // content of the triggering comment
-	ChatSessionID         string         `json:"chat_session_id,omitempty"`         // non-empty for chat tasks
-	ChatMessage           string         `json:"chat_message,omitempty"`            // user message for chat tasks
+	ID                    string                `json:"id"`
+	AgentID               string                `json:"agent_id"`
+	RuntimeID             string                `json:"runtime_id"`
+	IssueID               string                `json:"issue_id"`
+	WorkspaceID           string                `json:"workspace_id"`
+	Status                string                `json:"status"`
+	Priority              int32                 `json:"priority"`
+	DispatchedAt          *string               `json:"dispatched_at"`
+	StartedAt             *string               `json:"started_at"`
+	CompletedAt           *string               `json:"completed_at"`
+	Result                any                   `json:"result"`
+	Error                 *string               `json:"error"`
+	WorkflowStepID        *string               `json:"workflow_step_id,omitempty"`
+	AttemptNo             int32                 `json:"attempt_no"`
+	Agent                 *TaskAgentData        `json:"agent,omitempty"`
+	WorkflowStep          *TaskWorkflowStepData `json:"workflow_step,omitempty"`
+	Repos                 []RepoData            `json:"repos,omitempty"`
+	CreatedAt             string                `json:"created_at"`
+	PriorSessionID        string                `json:"prior_session_id,omitempty"`        // session ID from a previous task on same issue
+	PriorWorkDir          string                `json:"prior_work_dir,omitempty"`          // work_dir from a previous task on same issue
+	TriggerCommentID      *string               `json:"trigger_comment_id,omitempty"`      // comment that triggered this task
+	TriggerCommentContent string                `json:"trigger_comment_content,omitempty"` // content of the triggering comment
+	ChatSessionID         string                `json:"chat_session_id,omitempty"`         // non-empty for chat tasks
+	ChatMessage           string                `json:"chat_message,omitempty"`            // user message for chat tasks
 }
 
 // TaskAgentData holds agent info included in claim responses so the daemon
@@ -116,6 +145,20 @@ type TaskAgentData struct {
 	Instructions string                   `json:"instructions"`
 	Skills       []service.AgentSkillData `json:"skills,omitempty"`
 	CustomEnv    map[string]string        `json:"custom_env,omitempty"`
+	ToolPolicy   any                      `json:"tool_policy,omitempty"`
+}
+
+type TaskWorkflowStepData struct {
+	ID               string         `json:"id"`
+	WorkflowRunID    string         `json:"workflow_run_id"`
+	Role             string         `json:"role"`
+	Title            string         `json:"title"`
+	Objective        string         `json:"objective"`
+	WriteScope       string         `json:"write_scope"`
+	RepoTarget       string         `json:"repo_target"`
+	RequiresApproval bool           `json:"requires_approval"`
+	ContextVersion   int32          `json:"context_version"`
+	Metadata         map[string]any `json:"metadata"`
 }
 
 func taskToResponse(t db.AgentTaskQueue) AgentTaskResponse {
@@ -124,17 +167,19 @@ func taskToResponse(t db.AgentTaskQueue) AgentTaskResponse {
 		json.Unmarshal(t.Result, &result)
 	}
 	return AgentTaskResponse{
-		ID:           uuidToString(t.ID),
-		AgentID:      uuidToString(t.AgentID),
-		RuntimeID:    uuidToString(t.RuntimeID),
-		IssueID:      uuidToString(t.IssueID),
-		Status:       t.Status,
-		Priority:     t.Priority,
-		DispatchedAt: timestampToPtr(t.DispatchedAt),
-		StartedAt:    timestampToPtr(t.StartedAt),
-		CompletedAt:  timestampToPtr(t.CompletedAt),
-		Result:       result,
+		ID:               uuidToString(t.ID),
+		AgentID:          uuidToString(t.AgentID),
+		RuntimeID:        uuidToString(t.RuntimeID),
+		IssueID:          uuidToString(t.IssueID),
+		Status:           t.Status,
+		Priority:         t.Priority,
+		DispatchedAt:     timestampToPtr(t.DispatchedAt),
+		StartedAt:        timestampToPtr(t.StartedAt),
+		CompletedAt:      timestampToPtr(t.CompletedAt),
+		Result:           result,
 		Error:            textToPtr(t.Error),
+		WorkflowStepID:   uuidToPtr(t.WorkflowStepID),
+		AttemptNo:        t.AttemptNo,
 		CreatedAt:        timestampToString(t.CreatedAt),
 		TriggerCommentID: uuidToPtr(t.TriggerCommentID),
 	}
@@ -218,6 +263,9 @@ type CreateAgentRequest struct {
 	CustomEnv          map[string]string `json:"custom_env"`
 	Visibility         string            `json:"visibility"`
 	MaxConcurrentTasks int32             `json:"max_concurrent_tasks"`
+	WorkflowRoles      []string          `json:"workflow_roles"`
+	Capabilities       []string          `json:"capabilities"`
+	ToolPolicy         any               `json:"tool_policy"`
 }
 
 func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
@@ -267,6 +315,18 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	if req.CustomEnv == nil {
 		ce = []byte("{}")
 	}
+	capabilities, _ := json.Marshal(req.Capabilities)
+	if req.Capabilities == nil {
+		capabilities = []byte("[]")
+	}
+	toolPolicy, _ := json.Marshal(req.ToolPolicy)
+	if req.ToolPolicy == nil {
+		toolPolicy = []byte("{}")
+	}
+	workflowRoles := req.WorkflowRoles
+	if workflowRoles == nil {
+		workflowRoles = []string{"planner", "coder", "reviewer", "tester"}
+	}
 
 	agent, err := h.Queries.CreateAgent(r.Context(), db.CreateAgentParams{
 		WorkspaceID:        parseUUID(workspaceID),
@@ -281,6 +341,9 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		MaxConcurrentTasks: req.MaxConcurrentTasks,
 		OwnerID:            parseUUID(ownerID),
 		CustomEnv:          ce,
+		WorkflowRoles:      workflowRoles,
+		Capabilities:       capabilities,
+		ToolPolicy:         toolPolicy,
 	})
 	if err != nil {
 		slog.Warn("create agent failed", append(logger.RequestAttrs(r), "error", err, "workspace_id", workspaceID)...)
@@ -300,8 +363,6 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, resp)
 }
 
-
-
 type UpdateAgentRequest struct {
 	Name               *string            `json:"name"`
 	Description        *string            `json:"description"`
@@ -313,6 +374,9 @@ type UpdateAgentRequest struct {
 	Visibility         *string            `json:"visibility"`
 	Status             *string            `json:"status"`
 	MaxConcurrentTasks *int32             `json:"max_concurrent_tasks"`
+	WorkflowRoles      *[]string          `json:"workflow_roles"`
+	Capabilities       *[]string          `json:"capabilities"`
+	ToolPolicy         any                `json:"tool_policy"`
 }
 
 // canManageAgent checks whether the current user can update or archive an agent.
@@ -392,6 +456,17 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.MaxConcurrentTasks != nil {
 		params.MaxConcurrentTasks = pgtype.Int4{Int32: *req.MaxConcurrentTasks, Valid: true}
+	}
+	if req.WorkflowRoles != nil {
+		params.WorkflowRoles = *req.WorkflowRoles
+	}
+	if req.Capabilities != nil {
+		capabilities, _ := json.Marshal(*req.Capabilities)
+		params.Capabilities = capabilities
+	}
+	if req.ToolPolicy != nil {
+		toolPolicy, _ := json.Marshal(req.ToolPolicy)
+		params.ToolPolicy = toolPolicy
 	}
 
 	agent, err := h.Queries.UpdateAgent(r.Context(), params)

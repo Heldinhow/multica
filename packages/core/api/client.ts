@@ -53,6 +53,7 @@ import type {
   PinnedItemType,
   ReorderPinsRequest,
   Invitation,
+  WorkflowRun,
 } from "../types";
 import { type Logger, noopLogger } from "../logger";
 import { createRequestId } from "../utils";
@@ -487,6 +488,48 @@ export class ApiClient {
 
   async cancelTask(issueId: string, taskId: string): Promise<AgentTask> {
     return this.fetch(`/api/issues/${issueId}/tasks/${taskId}/cancel`, {
+      method: "POST",
+    });
+  }
+
+  async createWorkflow(issueId: string): Promise<WorkflowRun> {
+    return this.fetch(`/api/issues/${issueId}/workflows`, {
+      method: "POST",
+    });
+  }
+
+  async listIssueWorkflows(issueId: string): Promise<WorkflowRun[]> {
+    return this.fetch(`/api/issues/${issueId}/workflows`);
+  }
+
+  async getWorkflowRun(runId: string): Promise<WorkflowRun> {
+    return this.fetch(`/api/workflows/${runId}`);
+  }
+
+  async approveWorkflowApproval(
+    runId: string,
+    approvalId: string,
+    comment?: string,
+  ): Promise<WorkflowRun> {
+    return this.fetch(`/api/workflows/${runId}/approvals/${approvalId}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ comment }),
+    });
+  }
+
+  async rejectWorkflowApproval(
+    runId: string,
+    approvalId: string,
+    comment?: string,
+  ): Promise<WorkflowRun> {
+    return this.fetch(`/api/workflows/${runId}/approvals/${approvalId}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ comment }),
+    });
+  }
+
+  async cancelWorkflowRun(runId: string): Promise<WorkflowRun> {
+    return this.fetch(`/api/workflows/${runId}/cancel`, {
       method: "POST",
     });
   }

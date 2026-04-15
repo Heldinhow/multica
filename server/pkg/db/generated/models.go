@@ -38,6 +38,9 @@ type Agent struct {
 	ArchivedAt         pgtype.Timestamptz `json:"archived_at"`
 	ArchivedBy         pgtype.UUID        `json:"archived_by"`
 	CustomEnv          []byte             `json:"custom_env"`
+	WorkflowRoles      []string           `json:"workflow_roles"`
+	Capabilities       []byte             `json:"capabilities"`
+	ToolPolicy         []byte             `json:"tool_policy"`
 }
 
 type AgentRuntime struct {
@@ -80,6 +83,8 @@ type AgentTaskQueue struct {
 	WorkDir          pgtype.Text        `json:"work_dir"`
 	TriggerCommentID pgtype.UUID        `json:"trigger_comment_id"`
 	ChatSessionID    pgtype.UUID        `json:"chat_session_id"`
+	WorkflowStepID   pgtype.UUID        `json:"workflow_step_id"`
+	AttemptNo        int32              `json:"attempt_no"`
 }
 
 type Attachment struct {
@@ -359,6 +364,88 @@ type VerificationCode struct {
 	Used      bool               `json:"used"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 	Attempts  int32              `json:"attempts"`
+}
+
+type WorkflowApproval struct {
+	ID             pgtype.UUID        `json:"id"`
+	WorkflowRunID  pgtype.UUID        `json:"workflow_run_id"`
+	WorkflowStepID pgtype.UUID        `json:"workflow_step_id"`
+	FromStepID     pgtype.UUID        `json:"from_step_id"`
+	ToStepID       pgtype.UUID        `json:"to_step_id"`
+	Scope          string             `json:"scope"`
+	Status         string             `json:"status"`
+	ReviewerID     pgtype.UUID        `json:"reviewer_id"`
+	Comment        string             `json:"comment"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	ResolvedAt     pgtype.Timestamptz `json:"resolved_at"`
+}
+
+type WorkflowArtifact struct {
+	ID               pgtype.UUID        `json:"id"`
+	WorkflowRunID    pgtype.UUID        `json:"workflow_run_id"`
+	WorkflowStepID   pgtype.UUID        `json:"workflow_step_id"`
+	ArtifactType     string             `json:"artifact_type"`
+	Summary          string             `json:"summary"`
+	Content          []byte             `json:"content"`
+	CreatedByAgentID pgtype.UUID        `json:"created_by_agent_id"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+}
+
+type WorkflowEvent struct {
+	ID             pgtype.UUID        `json:"id"`
+	WorkflowRunID  pgtype.UUID        `json:"workflow_run_id"`
+	WorkflowStepID pgtype.UUID        `json:"workflow_step_id"`
+	EventType      string             `json:"event_type"`
+	Payload        []byte             `json:"payload"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
+type WorkflowRun struct {
+	ID                pgtype.UUID        `json:"id"`
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	IssueID           pgtype.UUID        `json:"issue_id"`
+	Status            string             `json:"status"`
+	Phase             string             `json:"phase"`
+	PlanVersion       int32              `json:"plan_version"`
+	TokenBudget       int64              `json:"token_budget"`
+	BaseBranch        string             `json:"base_branch"`
+	CreatedBy         pgtype.UUID        `json:"created_by"`
+	ApprovedPlanAt    pgtype.Timestamptz `json:"approved_plan_at"`
+	CancelledAt       pgtype.Timestamptz `json:"cancelled_at"`
+	MaxSteps          int32              `json:"max_steps"`
+	MaxReplans        int32              `json:"max_replans"`
+	MaxRetriesPerStep int32              `json:"max_retries_per_step"`
+	ReplanCount       int32              `json:"replan_count"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
+type WorkflowStep struct {
+	ID               pgtype.UUID        `json:"id"`
+	WorkflowRunID    pgtype.UUID        `json:"workflow_run_id"`
+	Role             string             `json:"role"`
+	Title            string             `json:"title"`
+	Objective        string             `json:"objective"`
+	Status           string             `json:"status"`
+	WriteScope       string             `json:"write_scope"`
+	RepoTarget       string             `json:"repo_target"`
+	AssignedAgentID  pgtype.UUID        `json:"assigned_agent_id"`
+	RequiresApproval bool               `json:"requires_approval"`
+	ContextVersion   int32              `json:"context_version"`
+	RetryCount       int32              `json:"retry_count"`
+	AttemptCount     int32              `json:"attempt_count"`
+	SortOrder        int32              `json:"sort_order"`
+	Metadata         []byte             `json:"metadata"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+}
+
+type WorkflowStepEdge struct {
+	ID            pgtype.UUID        `json:"id"`
+	WorkflowRunID pgtype.UUID        `json:"workflow_run_id"`
+	FromStepID    pgtype.UUID        `json:"from_step_id"`
+	ToStepID      pgtype.UUID        `json:"to_step_id"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 }
 
 type Workspace struct {

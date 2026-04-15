@@ -34,6 +34,8 @@ export interface AgentTask {
   completed_at: string | null;
   result: unknown;
   error: string | null;
+  workflow_step_id?: string | null;
+  attempt_no: number;
   created_at: string;
 }
 
@@ -51,6 +53,9 @@ export interface Agent {
   visibility: AgentVisibility;
   status: AgentStatus;
   max_concurrent_tasks: number;
+  workflow_roles: string[];
+  capabilities: string[];
+  tool_policy: Record<string, unknown>;
   owner_id: string | null;
   skills: Skill[];
   created_at: string;
@@ -69,6 +74,9 @@ export interface CreateAgentRequest {
   custom_env?: Record<string, string>;
   visibility?: AgentVisibility;
   max_concurrent_tasks?: number;
+  workflow_roles?: string[];
+  capabilities?: string[];
+  tool_policy?: Record<string, unknown>;
 }
 
 export interface UpdateAgentRequest {
@@ -82,6 +90,9 @@ export interface UpdateAgentRequest {
   visibility?: AgentVisibility;
   status?: AgentStatus;
   max_concurrent_tasks?: number;
+  workflow_roles?: string[];
+  capabilities?: string[];
+  tool_policy?: Record<string, unknown>;
 }
 
 // Skills

@@ -23,19 +23,20 @@ type RepoData struct {
 // Task represents a claimed task from the server.
 // Agent data (name, skills) is populated by the claim endpoint.
 type Task struct {
-	ID             string     `json:"id"`
-	AgentID        string     `json:"agent_id"`
-	RuntimeID      string     `json:"runtime_id"`
-	IssueID        string     `json:"issue_id"`
-	WorkspaceID    string     `json:"workspace_id"`
-	Agent          *AgentData `json:"agent,omitempty"`
-	Repos          []RepoData `json:"repos,omitempty"`
-	PriorSessionID   string     `json:"prior_session_id,omitempty"`    // Claude session ID from a previous task on this issue
-	PriorWorkDir     string     `json:"prior_work_dir,omitempty"`     // work_dir from a previous task on this issue
-	TriggerCommentID      string     `json:"trigger_comment_id,omitempty"`      // comment that triggered this task
-	TriggerCommentContent string     `json:"trigger_comment_content,omitempty"` // content of the triggering comment
-	ChatSessionID         string     `json:"chat_session_id,omitempty"`         // non-empty for chat tasks
-	ChatMessage           string     `json:"chat_message,omitempty"`            // user message content for chat tasks
+	ID                    string            `json:"id"`
+	AgentID               string            `json:"agent_id"`
+	RuntimeID             string            `json:"runtime_id"`
+	IssueID               string            `json:"issue_id"`
+	WorkspaceID           string            `json:"workspace_id"`
+	Agent                 *AgentData        `json:"agent,omitempty"`
+	WorkflowStep          *WorkflowStepData `json:"workflow_step,omitempty"`
+	Repos                 []RepoData        `json:"repos,omitempty"`
+	PriorSessionID        string            `json:"prior_session_id,omitempty"`        // Claude session ID from a previous task on this issue
+	PriorWorkDir          string            `json:"prior_work_dir,omitempty"`          // work_dir from a previous task on this issue
+	TriggerCommentID      string            `json:"trigger_comment_id,omitempty"`      // comment that triggered this task
+	TriggerCommentContent string            `json:"trigger_comment_content,omitempty"` // content of the triggering comment
+	ChatSessionID         string            `json:"chat_session_id,omitempty"`         // non-empty for chat tasks
+	ChatMessage           string            `json:"chat_message,omitempty"`            // user message content for chat tasks
 }
 
 // AgentData holds agent details returned by the claim endpoint.
@@ -45,6 +46,20 @@ type AgentData struct {
 	Instructions string            `json:"instructions"`
 	Skills       []SkillData       `json:"skills"`
 	CustomEnv    map[string]string `json:"custom_env,omitempty"`
+	ToolPolicy   map[string]any    `json:"tool_policy,omitempty"`
+}
+
+type WorkflowStepData struct {
+	ID               string         `json:"id"`
+	WorkflowRunID    string         `json:"workflow_run_id"`
+	Role             string         `json:"role"`
+	Title            string         `json:"title"`
+	Objective        string         `json:"objective"`
+	WriteScope       string         `json:"write_scope"`
+	RepoTarget       string         `json:"repo_target"`
+	RequiresApproval bool           `json:"requires_approval"`
+	ContextVersion   int32          `json:"context_version"`
+	Metadata         map[string]any `json:"metadata,omitempty"`
 }
 
 // SkillData represents a structured skill for task execution.

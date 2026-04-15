@@ -392,12 +392,50 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 				slog.Warn("failed to unmarshal agent custom_env", "agent_id", uuidToString(agent.ID), "error", err)
 			}
 		}
+		var toolPolicy any
+		if agent.ToolPolicy != nil {
+			if err := json.Unmarshal(agent.ToolPolicy, &toolPolicy); err != nil {
+				slog.Warn("failed to unmarshal agent tool_policy", "agent_id", uuidToString(agent.ID), "error", err)
+			}
+		}
+		if toolPolicy == nil {
+			toolPolicy = map[string]any{}
+		}
 		resp.Agent = &TaskAgentData{
 			ID:           uuidToString(agent.ID),
 			Name:         agent.Name,
 			Instructions: agent.Instructions,
 			Skills:       skills,
 			CustomEnv:    customEnv,
+			ToolPolicy:   toolPolicy,
+		}
+	}
+
+	if task.WorkflowStepID.Valid {
+		if step, err := h.Queries.GetWorkflowStep(r.Context(), task.WorkflowStepID); err == nil {
+			var metadata map[string]any
+			if step.Metadata != nil {
+				_ = json.Unmarshal(step.Metadata, &metadata)
+			}
+			if metadata == nil {
+				metadata = map[string]any{}
+			}
+			resp.WorkflowStep = &TaskWorkflowStepData{
+				ID:               uuidToString(step.ID),
+				WorkflowRunID:    uuidToString(step.WorkflowRunID),
+				Role:             step.Role,
+				Title:            step.Title,
+				Objective:        step.Objective,
+				WriteScope:       step.WriteScope,
+				RepoTarget:       step.RepoTarget,
+				RequiresApproval: step.RequiresApproval,
+				ContextVersion:   step.ContextVersion,
+				Metadata:         metadata,
+			}
+			_, _ = h.Queries.UpdateWorkflowStepState(r.Context(), db.UpdateWorkflowStepStateParams{
+				ID:     step.ID,
+				Status: pgtype.Text{String: "leased", Valid: true},
+			})
 		}
 	}
 
@@ -513,6 +551,12 @@ func (h *Handler) StartTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if task.WorkflowStepID.Valid {
+		_, _ = h.Queries.UpdateWorkflowStepState(r.Context(), db.UpdateWorkflowStepStateParams{
+			ID:     task.WorkflowStepID,
+			Status: pgtype.Text{String: "running", Valid: true},
+		})
+	}
 	slog.Info("task started", "task_id", taskID, "agent_id", uuidToString(task.AgentID))
 	writeJSON(w, http.StatusOK, taskToResponse(*task))
 }
@@ -580,6 +624,11 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if task.WorkflowStepID.Valid {
+		if wfErr := h.WorkflowService.HandleTaskCompletion(r.Context(), *task, req.Output); wfErr != nil {
+			slog.Warn("workflow completion reconciliation failed", "task_id", taskID, "error", wfErr)
+		}
+	}
 	slog.Info("task completed", "task_id", taskID, "agent_id", uuidToString(task.AgentID))
 	writeJSON(w, http.StatusOK, taskToResponse(*task))
 }
@@ -668,6 +717,11 @@ func (h *Handler) FailTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if task.WorkflowStepID.Valid {
+		if wfErr := h.WorkflowService.HandleTaskFailure(r.Context(), *task, req.Error); wfErr != nil {
+			slog.Warn("workflow failure reconciliation failed", "task_id", taskID, "error", wfErr)
+		}
+	}
 	slog.Info("task failed", "task_id", taskID, "agent_id", uuidToString(task.AgentID), "task_error", req.Error)
 	writeJSON(w, http.StatusOK, taskToResponse(*task))
 }

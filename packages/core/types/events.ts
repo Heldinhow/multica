@@ -24,6 +24,10 @@ export type WSEventType =
   | "task:failed"
   | "task:message"
   | "task:cancelled"
+  | "workflow:run_updated"
+  | "workflow:step_updated"
+  | "workflow:approval_requested"
+  | "workflow:event_created"
   | "inbox:new"
   | "inbox:read"
   | "inbox:archived"
@@ -250,6 +254,36 @@ export interface ChatDonePayload {
 
 export interface ChatSessionReadPayload {
   chat_session_id: string;
+}
+
+export interface WorkflowRunUpdatedPayload {
+  run_id: string;
+  issue_id: string;
+  status: string;
+  phase: string;
+  plan_version: number;
+  action: string;
+}
+
+export interface WorkflowStepUpdatedPayload {
+  run_id: string;
+  issue_id: string;
+  workflow_step_id: string;
+  status: string;
+  role: string;
+  title: string;
+  assigned_agent_id?: string;
+  action: string;
+}
+
+export interface WorkflowApprovalRequestedPayload {
+  run_id: string;
+  issue_id: string;
+  approval_id: string;
+  workflow_step_id?: string;
+  scope: string;
+  status: string;
+  action: string;
 }
 
 export interface ProjectCreatedPayload {

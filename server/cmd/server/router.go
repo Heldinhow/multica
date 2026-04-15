@@ -216,6 +216,8 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus) chi.Route
 					r.Get("/", h.GetIssue)
 					r.Put("/", h.UpdateIssue)
 					r.Delete("/", h.DeleteIssue)
+					r.Post("/workflows", h.CreateWorkflow)
+					r.Get("/workflows", h.ListIssueWorkflows)
 					r.Post("/comments", h.CreateComment)
 					r.Get("/comments", h.ListComments)
 					r.Get("/timeline", h.ListTimeline)
@@ -235,6 +237,12 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus) chi.Route
 
 			// Task messages (user-facing, not daemon auth)
 			r.Get("/api/tasks/{taskId}/messages", h.ListTaskMessagesByUser)
+			r.Route("/api/workflows/{runId}", func(r chi.Router) {
+				r.Get("/", h.GetWorkflowRun)
+				r.Post("/cancel", h.CancelWorkflowRun)
+				r.Post("/approvals/{approvalId}/approve", h.ApproveWorkflowApproval)
+				r.Post("/approvals/{approvalId}/reject", h.RejectWorkflowApproval)
+			})
 
 			// Projects
 			r.Route("/api/projects", func(r chi.Router) {

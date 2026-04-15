@@ -11,10 +11,10 @@ const (
 	EventCommentCreated       = "comment:created"
 	EventCommentUpdated       = "comment:updated"
 	EventCommentDeleted       = "comment:deleted"
-	EventReactionAdded          = "reaction:added"
-	EventReactionRemoved        = "reaction:removed"
-	EventIssueReactionAdded     = "issue_reaction:added"
-	EventIssueReactionRemoved   = "issue_reaction:removed"
+	EventReactionAdded        = "reaction:added"
+	EventReactionRemoved      = "reaction:removed"
+	EventIssueReactionAdded   = "issue_reaction:added"
+	EventIssueReactionRemoved = "issue_reaction:removed"
 
 	// Agent events
 	EventAgentStatus   = "agent:status"
@@ -29,6 +29,12 @@ const (
 	EventTaskFailed    = "task:failed"
 	EventTaskMessage   = "task:message"
 	EventTaskCancelled = "task:cancelled"
+
+	// Workflow events
+	EventWorkflowRunUpdated        = "workflow:run_updated"
+	EventWorkflowStepUpdated       = "workflow:step_updated"
+	EventWorkflowApprovalRequested = "workflow:approval_requested"
+	EventWorkflowEventCreated      = "workflow:event_created"
 
 	// Inbox events
 	EventInboxNew           = "inbox:new"

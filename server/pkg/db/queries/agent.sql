@@ -20,8 +20,8 @@ WHERE id = $1 AND workspace_id = $2;
 INSERT INTO agent (
     workspace_id, name, description, avatar_url, runtime_mode,
     runtime_config, runtime_id, visibility, max_concurrent_tasks, owner_id,
-    instructions, custom_env
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    instructions, custom_env, workflow_roles, capabilities, tool_policy
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE(sqlc.narg('workflow_roles'), ARRAY['planner', 'coder', 'reviewer', 'tester']::text[]), COALESCE(sqlc.narg('capabilities'), '[]'::jsonb), COALESCE(sqlc.narg('tool_policy'), '{}'::jsonb))
 RETURNING *;
 
 -- name: UpdateAgent :one
@@ -37,6 +37,9 @@ UPDATE agent SET
     max_concurrent_tasks = COALESCE(sqlc.narg('max_concurrent_tasks'), max_concurrent_tasks),
     instructions = COALESCE(sqlc.narg('instructions'), instructions),
     custom_env = COALESCE(sqlc.narg('custom_env'), custom_env),
+    workflow_roles = COALESCE(sqlc.narg('workflow_roles'), workflow_roles),
+    capabilities = COALESCE(sqlc.narg('capabilities'), capabilities),
+    tool_policy = COALESCE(sqlc.narg('tool_policy'), tool_policy),
     updated_at = now()
 WHERE id = $1
 RETURNING *;
@@ -59,6 +62,13 @@ ORDER BY created_at DESC;
 -- name: CreateAgentTask :one
 INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, trigger_comment_id)
 VALUES ($1, $2, $3, 'queued', $4, sqlc.narg(trigger_comment_id))
+RETURNING *;
+
+-- name: CreateWorkflowStepTask :one
+INSERT INTO agent_task_queue (
+    agent_id, runtime_id, issue_id, status, priority, workflow_step_id, attempt_no
+)
+VALUES ($1, $2, $3, 'queued', $4, $5, $6)
 RETURNING *;
 
 -- name: CancelAgentTasksByIssue :exec

@@ -34,3 +34,4 @@ export type { ChatSession, ChatMessage, ChatPendingTask, PendingChatTaskItem, Pe
 export type { StorageAdapter } from "./storage";
 export type { Project, ProjectStatus, ProjectPriority, CreateProjectRequest, UpdateProjectRequest, ListProjectsResponse } from "./project";
 export type { PinnedItem, PinnedItemType, CreatePinRequest, ReorderPinsRequest } from "./pin";
+export type { WorkflowRun, WorkflowStep, WorkflowEdge, WorkflowArtifact, WorkflowApproval, WorkflowEvent, WorkflowTaskAttempt } from "./workflow";
