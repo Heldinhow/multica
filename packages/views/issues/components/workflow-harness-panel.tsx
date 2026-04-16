@@ -422,7 +422,7 @@ function HitlGate({ run, onTransition, isPending, reason, setReason }: {
               <ShieldCheck className="h-3.5 w-3.5" />
               Approve Plan
             </Button>
-            <Button size="sm" variant="outline" onClick={() => onTransition("send_back", "planning_tasks")} disabled={isPending} className="gap-1.5">
+            <Button size="sm" variant="outline" onClick={() => onTransition("send_back", run.rejectionTarget || "planning_tasks")} disabled={isPending} className="gap-1.5">
               <RotateCcw className="h-3.5 w-3.5" />
               Send Back
             </Button>
@@ -440,7 +440,7 @@ function HitlGate({ run, onTransition, isPending, reason, setReason }: {
               <ShieldCheck className="h-3.5 w-3.5" />
               Approve
             </Button>
-            <Button size="sm" variant="outline" onClick={() => onTransition("send_back", "code_review")} disabled={isPending} className="gap-1.5">
+            <Button size="sm" variant="outline" onClick={() => onTransition("send_back", run.rejectionTarget || "code_review")} disabled={isPending} className="gap-1.5">
               <RotateCcw className="h-3.5 w-3.5" />
               Send Back to Review
             </Button>
